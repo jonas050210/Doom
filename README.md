@@ -442,3 +442,25 @@ python -m ruff format --check src tests
 CI runs unit tests on Ubuntu and Windows with Python 3.11/3.12; end-to-end
 training and POSIX signal handling run on Ubuntu. Real CUDA hardware and the
 Windows desktop must still be verified on the target machines.
+
+### Find a good parallel training count
+
+```bash
+python -m src.benchmark --env-counts 1 2 4 8 --seconds 20 --device cuda
+```
+
+PowerShell uses the same command after activating the venv. Each trial creates
+an independent disposable PPO model, warms up for one rollout/update, then
+measures complete training cycles for approximately 20 seconds. Setup/warmup
+is excluded; the final cycle finishes, so wall time is longer than the requested
+measurement duration. Results include actual steps/second, actual device and
+elapsed time in `runs/benchmark-results.json`. Existing checkpoints are untouched.
+No evaluation/rendering/checkpoint overhead is included in the timed section.
+
+Repeat with `--seconds 30` to confirm close results. More environments are not
+always faster. This holds per-environment `n_steps` fixed, so total rollout size
+and minibatch work change with `n_envs`; it compares configurations, not learning
+quality. Use the fastest measured count as a starting point for a fresh training
+run, then compare held-out evaluation rewards. Benchmark models are discarded,
+not combined with your trained agent. CPU thread count defaults to 1 and can be
+changed with `--threads`. Large counts may exhaust RAM/VRAM; start small.
