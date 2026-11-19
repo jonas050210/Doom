@@ -6,6 +6,7 @@ falls back to headless mode when running without an X11/Wayland display.
 
 import argparse
 import os
+import sys
 import time
 from typing import Optional
 
@@ -15,7 +16,9 @@ from src.model import load_ppo_model
 
 
 def has_display() -> bool:
-    """Return True if an X11 or Wayland display environment variable is set."""
+    """Return True if a graphical display is available (Windows, macOS, or Linux X11/Wayland)."""
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
@@ -49,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         "--headless",
         action="store_true",
         help="Force headless mode even if a display is available.",
+    )
+    parser.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Use frame_stack=1 to minimize RAM usage (for 2 GB RAM laptops).",
     )
     parser.add_argument(
         "--sleep",
@@ -94,6 +102,7 @@ def main() -> None:
     env = VizDoomEnv(
         EnvConfig(
             scenario=args.scenario,
+            frame_stack=1 if args.low_ram else 4,
             seed=args.seed,
             window_visible=window_visible,
         )

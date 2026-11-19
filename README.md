@@ -48,10 +48,18 @@ nvidia-smi
 You should see your GPU (e.g., NVIDIA RTX 4060 Ti 8 GB) and CUDA version.
 
 ### 2. Set Up the Environment
+**Ubuntu / Linux:**
 ```bash
 chmod +x setup.sh
 ./setup.sh
 source .venv/bin/activate
+```
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\setup.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 ### 3. Verify GPU PyTorch
@@ -76,6 +84,12 @@ python -m src.train --scenario my_way_home --timesteps 10000
 For the optional survival scenario (collecting health packs):
 ```bash
 python -m src.train --scenario health_gathering --timesteps 10000
+```
+For **2 GB RAM laptops** (e.g. i3-1215U on Windows), use `--low-ram` (`frame_stack=1`, `n_steps=256`, `batch_size=32`, CPU):
+```bash
+python -m src.train --low-ram --timesteps 2048
+python -m src.evaluate --checkpoint checkpoints/my_way_home_final.zip --low-ram --episodes 3
+python -m src.play --checkpoint checkpoints/my_way_home_final.zip --low-ram --episodes 1
 ```
 
 ### 7. Evaluate a Trained Checkpoint

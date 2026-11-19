@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cuda", "cpu"],
         help="PyTorch device to use.",
     )
+    parser.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Use frame_stack=1 to match a --low-ram trained checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -53,9 +58,17 @@ def evaluate(
     episodes: int = 10,
     seed: int = 100,
     device: str = "auto",
+    low_ram: bool = False,
 ) -> None:
     model = load_ppo_model(checkpoint_path, device=device)
-    env = VizDoomEnv(EnvConfig(scenario=scenario, seed=seed, window_visible=False))
+    env = VizDoomEnv(
+        EnvConfig(
+            scenario=scenario,
+            frame_stack=1 if low_ram else 4,
+            seed=seed,
+            window_visible=False,
+        )
+    )
 
     rewards: List[float] = []
     lengths: List[int] = []
@@ -109,6 +122,7 @@ def main() -> None:
         episodes=args.episodes,
         seed=args.seed,
         device=args.device,
+        low_ram=args.low_ram,
     )
 
 
