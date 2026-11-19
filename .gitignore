@@ -18,6 +18,14 @@ logs/
 *.pt
 *.pth
 *.tfevents.*
+*.eval.json
+run.json
+_vizdoom.ini
+
+# Tooling caches
+.ruff_cache/
+.coverage
+htmlcov/
 
 # OS / IDE
 .DS_Store
