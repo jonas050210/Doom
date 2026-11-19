@@ -12,9 +12,11 @@ def test_default_action_names():
 
 def test_optional_action_names():
     names = get_action_names(include_use_attack=True)
-    assert len(names) == 7
+    assert len(names) == 9
     assert "use" in names
     assert "attack" in names
+    assert "backward" in names
+    assert "backward_attack" in names
 
 
 def test_build_action_matrix_mapping():
