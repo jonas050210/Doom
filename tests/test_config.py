@@ -101,8 +101,15 @@ def test_missing_sidecar_returns_none(tmp_path):
     assert load_env_config_for_model(str(tmp_path / "nope.zip")) is None
 
 
+def _touch_checkpoint(tmp_path, name: str = "model.zip") -> str:
+    """Create an empty placeholder checkpoint file (only its path matters)."""
+    path = tmp_path / name
+    path.write_bytes(b"")
+    return str(path)
+
+
 def test_sidecar_is_authoritative(tmp_path):
-    model_path = str(tmp_path / "model.zip")
+    model_path = _touch_checkpoint(tmp_path)
     save_env_config_for_model(EnvConfig(scenario="basic", frame_stack=1), model_path)
     cfg = resolve_checkpoint_env_config(
         model_path, scenario=None, frame_stack=4, window_visible=False
@@ -112,7 +119,7 @@ def test_sidecar_is_authoritative(tmp_path):
 
 
 def test_sidecar_rejects_conflicting_scenario(tmp_path):
-    model_path = str(tmp_path / "model.zip")
+    model_path = _touch_checkpoint(tmp_path)
     save_env_config_for_model(EnvConfig(scenario="basic"), model_path)
     with pytest.raises(SystemExit, match="trained on 'basic'"):
         resolve_checkpoint_env_config(model_path, scenario="my_way_home")
@@ -120,10 +127,37 @@ def test_sidecar_rejects_conflicting_scenario(tmp_path):
 
 def test_fallback_without_sidecar_uses_cli(tmp_path):
     cfg = resolve_checkpoint_env_config(
-        str(tmp_path / "legacy.zip"), scenario="basic", frame_stack=2
+        _touch_checkpoint(tmp_path, "legacy.zip"), scenario="basic", frame_stack=2
     )
     assert cfg.scenario == "basic"
     assert cfg.frame_stack == 2
+
+
+@pytest.mark.parametrize("suffix", [".zip", ""])
+def test_missing_checkpoint_fails_before_sidecar_warning(tmp_path, capsys, suffix):
+    """A typo'd checkpoint path must be one clear error, not a sad sidecar."""
+    missing = str(tmp_path / f"nope{suffix}")
+    with pytest.raises(FileNotFoundError) as excinfo:
+        resolve_checkpoint_env_config(missing, scenario="basic")
+    message = str(excinfo.value)
+    assert "Checkpoint not found" in message
+    assert ".zip" in message  # the hint suggests the right extension
+    assert capsys.readouterr().out == ""
+
+
+def test_missing_checkpoint_suggests_nearby_models(tmp_path):
+    """A typo in the checkpoint name should point at the file that does exist."""
+    good = tmp_path / "defend_the_center_latest.zip"
+    good.write_bytes(b"")
+    with pytest.raises(FileNotFoundError) as excinfo:
+        resolve_checkpoint_env_config(str(tmp_path / "defend_the_center_lates.zip"))
+    message = str(excinfo.value)
+    assert "Checkpoints that do exist" in message
+    assert good.name in message
+
+
+def test_env_config_silences_engine_by_default():
+    assert EnvConfig().silence_engine is True
 
 
 def test_train_config_rejects_batch_larger_than_rollout():

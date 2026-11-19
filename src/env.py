@@ -20,6 +20,7 @@ import contextlib
 import os
 import sys
 from collections import deque
+from collections.abc import Iterator
 from typing import Any
 
 import cv2
@@ -32,6 +33,44 @@ from src.actions import build_action_matrix
 from src.config import EnvConfig, ScenarioSpec, resolve_scenario
 
 EPISODE_OUTCOMES = ("goal", "death", "timeout")
+
+
+@contextlib.contextmanager
+def suppressed_stdio() -> Iterator[None]:
+    """Send file descriptors 1 and 2 to ``os.devnull`` for the duration.
+
+    ViZDoom starts its engine as a child process that inherits our stdout. On
+    Windows that child keeps writing its start-up banner (``W_Init: Init
+    WADfiles...``) straight to the console, which buries test and training
+    output. Redirecting the descriptors before ``game.init()`` means the engine
+    inherits a silent handle and stays quiet for its whole lifetime, while
+    Python's own output is restored immediately afterwards.
+
+    The redirection is process-wide for the few milliseconds ``init()`` takes,
+    so it is only safe because environments are created one at a time.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        # The engine runs in a child process, so the null handle has to be
+        # inheritable or the child would inherit an invalid stdout handle.
+        with contextlib.suppress(OSError):  # pragma: no cover - platform quirk
+            os.set_inheritable(devnull, True)
+        saved = (os.dup(1), os.dup(2))
+    except OSError:  # pragma: no cover - no usable stdio
+        yield
+        return
+
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        for target, backup in zip((1, 2), saved, strict=True):
+            os.dup2(backup, target)
+            os.close(backup)
+        os.close(devnull)
 
 
 def has_display() -> bool:
@@ -129,7 +168,24 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
 
         self.game.set_screen_resolution(vzd.ScreenResolution.RES_320X240)
         self.game.set_seed(self.config.seed)
-        self.game.init()
+        self._init_game()
+
+    def _init_game(self) -> None:
+        """Start the engine, optionally with its console banner suppressed."""
+        try:
+            if self.config.silence_engine:
+                with suppressed_stdio():
+                    self.game.init()
+            else:
+                self.game.init()
+        except Exception as exc:
+            hint = ""
+            if self.config.silence_engine:
+                hint = (
+                    " ViZDoom engine output was suppressed; re-run with "
+                    "--engine-log (or silence_engine=False) to see it."
+                )
+            raise RuntimeError(f"ViZDoom failed to initialise: {exc}.{hint}") from exc
 
     def _read_timeout_ticks(self) -> int:
         getter = getattr(self.game, "get_episode_timeout", None)

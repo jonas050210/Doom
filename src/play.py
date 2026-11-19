@@ -52,6 +52,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Only used when the checkpoint has no .env.json sidecar.",
     )
     parser.add_argument(
+        "--engine-log",
+        action="store_true",
+        help="Show the ViZDoom engine log (hidden by default).",
+    )
+    parser.add_argument(
         "--sleep",
         type=float,
         default=0.02,
@@ -84,20 +89,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     model: PPO | None = None
     if args.checkpoint and not args.random:
-        env_cfg: EnvConfig = resolve_checkpoint_env_config(
-            args.checkpoint,
-            scenario=args.scenario,
-            seed=args.seed,
-            frame_stack=args.frame_stack,
-            window_visible=window_visible,
-        )
-        model = load_ppo_model(args.checkpoint, device=args.device)
+        try:
+            env_cfg: EnvConfig = resolve_checkpoint_env_config(
+                args.checkpoint,
+                scenario=args.scenario,
+                seed=args.seed,
+                frame_stack=args.frame_stack,
+                window_visible=window_visible,
+                silence_engine=not args.engine_log,
+            )
+            model = load_ppo_model(args.checkpoint, device=args.device)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}")
+            return 2
     else:
         env_cfg = EnvConfig(
             scenario=args.scenario or "my_way_home",
             frame_stack=4 if args.frame_stack is None else args.frame_stack,
             seed=args.seed,
             window_visible=window_visible,
+            silence_engine=not args.engine_log,
         )
 
     env = VizDoomEnv(config=env_cfg)

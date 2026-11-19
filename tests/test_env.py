@@ -5,13 +5,50 @@ the scenario timeout (truncated), and ``is_success`` must not be guessed from
 the reward sign.
 """
 
+import os
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from src.config import EnvConfig
-from src.env import VizDoomEnv
+from src.env import VizDoomEnv, suppressed_stdio
+
+
+def test_suppressed_stdio_hides_prints_and_restores_stdout(capsys):
+    """The engine banner goes to fd 1, so silencing must work at that level."""
+    real_stdout = os.dup(1)
+    try:
+        with suppressed_stdio():
+            os.write(1, b"this must not be visible\n")
+        os.dup2(real_stdout, 1)
+        print("stdout is back")
+        assert "stdout is back" in capsys.readouterr().out
+        assert "this must not be visible" not in capsys.readouterr().out
+    finally:
+        os.dup2(real_stdout, 1)
+        os.close(real_stdout)
+
+
+def test_suppressed_stdio_restores_after_an_exception():
+    real_stdout = os.dup(1)
+    try:
+        with pytest.raises(RuntimeError), suppressed_stdio():
+            raise RuntimeError("boom")
+        assert os.isatty(1) == os.isatty(real_stdout)
+    finally:
+        os.dup2(real_stdout, 1)
+        os.close(real_stdout)
+
+
+def test_env_can_init_with_engine_log_visible(make_env):
+    """``silence_engine=False`` (``--engine-log``) must still work."""
+    env = VizDoomEnv(config=EnvConfig(scenario="basic", frame_stack=1, silence_engine=False))
+    try:
+        env.reset(seed=0)
+    finally:
+        env.close()
+
 
 EXPECTED_ACTION_COUNTS = {
     "my_way_home": 7,

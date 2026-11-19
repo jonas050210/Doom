@@ -57,6 +57,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--render", action="store_true", help="Show the game window while evaluating."
     )
+    parser.add_argument(
+        "--engine-log",
+        action="store_true",
+        help="Show the ViZDoom engine log (hidden by default).",
+    )
     return parser.parse_args(argv)
 
 
@@ -66,6 +71,7 @@ def build_eval_env(
     seed: int = 100,
     frame_stack: int | None = None,
     window_visible: bool = False,
+    silence_engine: bool | None = None,
 ) -> EnvConfig:
     """Return the env config that matches ``checkpoint`` (see config module)."""
     return resolve_checkpoint_env_config(
@@ -74,6 +80,7 @@ def build_eval_env(
         seed=seed,
         frame_stack=frame_stack,
         window_visible=window_visible,
+        silence_engine=silence_engine,
     )
 
 
@@ -115,6 +122,7 @@ def evaluate(
     frame_stack: int | None = None,
     window_visible: bool = False,
     output: str | None = None,
+    silence_engine: bool | None = None,
 ) -> dict[str, Any]:
     """Run deterministic episodes and return a result summary.
 
@@ -131,6 +139,7 @@ def evaluate(
         seed=seed,
         frame_stack=frame_stack,
         window_visible=window_visible,
+        silence_engine=silence_engine,
     )
     env = VizDoomEnv(config=env_cfg)
     try:
@@ -249,6 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             frame_stack=args.frame_stack,
             window_visible=args.render,
             output=args.output,
+            silence_engine=not args.engine_log,
         )
     except (ValueError, FileNotFoundError) as exc:
         print(f"Error: {exc}")
