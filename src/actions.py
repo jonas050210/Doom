@@ -21,6 +21,11 @@ BASE_ACTIONS: List[Dict[str, object]] = [
 OPTIONAL_ACTIONS: List[Dict[str, object]] = [
     {"name": "use", "buttons": [vzd.Button.USE]},
     {"name": "attack", "buttons": [vzd.Button.ATTACK]},
+    {"name": "backward", "buttons": [vzd.Button.MOVE_BACKWARD]},
+    {
+        "name": "backward_attack",
+        "buttons": [vzd.Button.MOVE_BACKWARD, vzd.Button.ATTACK],
+    },
 ]
 
 

@@ -89,7 +89,7 @@ def test_combat_scenarios(scenario):
     try:
         obs, _ = env.reset(seed=42)
         assert obs.shape == (1, 84, 84)
-        assert env.action_space.n == 7
+        assert env.action_space.n == 9
         for _ in range(5):
             obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
             if terminated or truncated:

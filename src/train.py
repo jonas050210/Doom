@@ -77,6 +77,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use low-RAM preset (frame_stack=1, n_steps=256, batch_size=32, CPU) for 2 GB RAM laptops.",
     )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="Show the ViZDoom window during training so you can watch the agent learn live.",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +97,7 @@ def main() -> None:
 
     if args.low_ram:
         env_cfg, train_cfg = get_low_ram_configs(scenario=args.scenario, seed=args.seed)
+        env_cfg.window_visible = args.render
         train_cfg.total_timesteps = args.timesteps if args.timesteps != 100_000 else train_cfg.total_timesteps
         train_cfg.save_dir = run_ckpt_dir
         train_cfg.log_dir = run_log_dir
@@ -100,7 +106,7 @@ def main() -> None:
             scenario=args.scenario,
             include_use_attack=bool(SCENARIOS[args.scenario].get("combat", False)),
             seed=args.seed,
-            window_visible=False,
+            window_visible=args.render,
         )
         train_cfg = TrainConfig(
             total_timesteps=args.timesteps,
