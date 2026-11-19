@@ -16,6 +16,7 @@ Design notes
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import warnings
@@ -131,6 +132,8 @@ class EnvConfig:
         frame_skip: Tics executed per agent step (ViZDoom ``make_action`` skip).
         frame_stack: Number of consecutive frames stacked along the channel axis.
         window_visible: Open the ViZDoom window (requires a display).
+        silence_engine: Suppress the ViZDoom engine log (it prints engine
+            start-up noise to the terminal on every environment instance).
         seed: Default seed used when ``reset()`` is called without one.
     """
 
@@ -141,6 +144,7 @@ class EnvConfig:
     frame_skip: int = 4
     frame_stack: int = 4
     window_visible: bool = False
+    silence_engine: bool = True
     seed: int = 42
 
     def __post_init__(self) -> None:
@@ -354,6 +358,34 @@ def build_configs(
     return env_cfg, train_cfg
 
 
+def _checkpoint_hint(checkpoint_path: str) -> str:
+    """Explain a missing checkpoint: the usual ``.zip`` slip, or what is nearby.
+
+    Pointing at the files that *do* exist turns the most common mistake (a
+    typo'd or not-yet-written path) into a one-line fix instead of a traceback.
+    """
+    parts: list[str] = []
+    if not checkpoint_path.endswith(".zip"):
+        parts.append("Stable-Baselines3 saves models as '.zip'; try adding it.")
+
+    folder = os.path.dirname(checkpoint_path) or "."
+    target = os.path.basename(checkpoint_path)
+    try:
+        candidates = sorted(n for n in os.listdir(folder) if n.endswith(".zip"))
+    except OSError:
+        candidates = []
+    if candidates:
+        ranked = sorted(
+            candidates,
+            key=lambda name: difflib.SequenceMatcher(None, target, name).ratio(),
+            reverse=True,
+        )
+        listed = ", ".join(os.path.join(folder, name) for name in ranked[:3])
+        parts.append(f"Checkpoints that do exist: {listed}.")
+
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def resolve_checkpoint_env_config(
     checkpoint_path: str,
     *,
@@ -361,6 +393,7 @@ def resolve_checkpoint_env_config(
     seed: int = 100,
     frame_stack: int | None = None,
     window_visible: bool = False,
+    silence_engine: bool | None = None,
 ) -> EnvConfig:
     """Return the environment config that reproduces ``checkpoint_path``.
 
@@ -370,6 +403,11 @@ def resolve_checkpoint_env_config(
     Raises:
         SystemExit: If an explicit ``scenario`` contradicts the sidecar.
     """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}.{_checkpoint_hint(checkpoint_path)}"
+        )
+
     stored = load_env_config_for_model(checkpoint_path)
     if stored is not None:
         if scenario is not None and scenario != stored.scenario:
@@ -384,6 +422,8 @@ def resolve_checkpoint_env_config(
                 f"was trained with frame_stack={stored.frame_stack}."
             )
         stored.window_visible = window_visible
+        if silence_engine is not None:
+            stored.silence_engine = silence_engine
         return stored
 
     print(
@@ -395,4 +435,5 @@ def resolve_checkpoint_env_config(
         frame_stack=4 if frame_stack is None else frame_stack,
         seed=seed,
         window_visible=window_visible,
+        **({} if silence_engine is None else {"silence_engine": silence_engine}),
     )

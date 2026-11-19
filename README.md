@@ -108,7 +108,17 @@ Peak memory measured for a `--low-ram` run (frames 84x84, one stacked frame, `n_
 
 So `--low-ram` needs roughly **1 GB**. That fits the laptop's 2 GB *if* you close the browser/other apps while training; the integrated GPU's "4 GB shared memory" is irrelevant because PyTorch runs on the CPU and a full frame buffer here is about 400 KB.
 
-Throughput measured on a 2-vCPU container (comparable to the laptop's P-core count): ~**210 fps** on `basic`, ~**125 fps** on `my_way_home` with `--low-ram`. That means 20k timesteps of `basic` take roughly 2 minutes, and 100k would take ~8 minutes of pure training time.
+Throughput, measured (not estimated) with `--low-ram`:
+
+| Machine | `basic` | `my_way_home` | 100k steps of `defend_the_center` |
+|---|---|---|---|
+| 2-vCPU Linux container (`--low-ram`) | ~210 fps | ~125 fps | ~8 min |
+| **i3-1310U laptop, Windows, 2 GB free RAM** | **17-43 fps** | not measured | **40-100 min** |
+| i7-12700F + RTX 4060 Ti, Ubuntu | not measured | not measured | not measured |
+
+The laptop number is a real measurement that replaced an earlier ~210 fps assumption (which came from the container and was wrong for the laptop by 5-10x). The spread between 17 and 43 fps is what the machine actually produces run to run - it tracks whatever else is running (browser, Windows background work), so expect the low end while other apps are open. That is why the laptop is the *check that it learns* machine and the workstation is the *train the research model* machine.
+
+Thread tuning was tried and rejected: `OMP_NUM_THREADS=1` gave 206 fps, `=2` gave 195 fps and the default 200 fps in the container, so there is no flag worth adding.
 
 On a 2-core laptop keep `--n-envs 1` (parallel envs only add RAM and CPU contention). On the 4060 Ti use `--n-envs 4`-`8`.
 
@@ -251,12 +261,14 @@ python -m src.train --scenario my_way_home --low-ram --timesteps 2048
 # 3. look at it
 python -m src.evaluate --checkpoint checkpoints/my_way_home_latest.zip --episodes 3
 
-# 4. shooting training (~8 min) - the recipe that is verified to work
+# 4. shooting training (40-100 min on the laptop; see throughput table) - verified recipe
 python -m src.train --scenario defend_the_center --low-ram --n-steps 512 --ent-coef 0.05 --timesteps 100000 --eval-freq 25000 --checkpoint-freq 25000 --n-eval-episodes 5
 python -m src.evaluate --checkpoint checkpoints/defend_the_center_latest.zip --episodes 10
 ```
 
 Keep the browser closed while training; ~810 MB is half of your free RAM.
+
+Because the shooting run is 40-100 minutes there, know that stopping it is safe: `Ctrl-C` saves the current policy (``checkpoints/defend_the_center_final.zip``) and `--resume` continues from it later, and `--checkpoint-freq 25000` writes an intermediate model every 25k steps that you can `--evaluate` straight away to see whether the reward is climbing.
 
 ### Does it actually learn to shoot?
 
@@ -275,7 +287,7 @@ What this means for a laptop-sized budget:
 
 * **`defend_the_center` is the shooting scenario to use.** Its reward pays directly for kills (+1 each, -1 for dying), so the gradient points at shooting.
 * **`basic` is a trap for short runs.** Not shooting times out at -300, shooting randomly scores about -360, so the agent learns to stand still. It is a good pipeline check (random actions already win ~60%), a poor learning demo.
-* **20k steps is not enough** for a deterministic shooting policy; the policy still spreads probability mass over actions. Around 100k steps (~8 minutes at ~230 fps) it visibly commits: 4 kills at 25k steps, 17 at 50k.
+* **20k steps is not enough** for a deterministic shooting policy; the policy still spreads probability mass over actions (measured: -1.0 reward, it never fires). At 100k steps it commits: **+17.1**, i.e. ~17 kills per episode.
 * `--low-ram` with `--n-steps 512` still stays around 0.85 GB RAM, so it fits the laptop.
 
 ### Workstation (i7-12700F, 32 GB, RTX 4060 Ti 8 GB, Ubuntu)
@@ -310,6 +322,8 @@ python -m pytest --cov=src        # with coverage
 ruff check src tests && ruff format --check src tests
 ```
 
+A passing run prints only test progress: the ViZDoom engine banner is suppressed during `game.init()` (see Troubleshooting), so pytest output is readable on Windows too.
+
 The fast suite covers action-matrix invariants per scenario, config validation and sidecar round-trips, observation determinism and frame stacking, termination-vs-truncation semantics, device handling, CLI parsing, resume-path logic, and evaluation summaries. `.github/workflows/ci.yml` runs lint plus the full suite on Python 3.11 and 3.12, and the end-to-end smoke job separately.
 
 ---
@@ -334,6 +348,8 @@ The fast suite covers action-matrix invariants per scenario, config validation a
 | Checkpoint won't load (`action space mismatch`) | The scenario or action catalogue changed since training. Retrain, or evaluate with the scenario it was trained on. |
 | `setup.sh` fails on Python 3.13+ | Prebuilt `vizdoom`/`torch` wheels may not exist yet; use 3.11 or 3.12. |
 | Training is slow on one env | `--n-envs 2`/`4` runs parallel ViZDoom processes; each adds ~200 MB RAM. |
+| The ViZDoom engine log is hidden | Intentional: the engine banner (`OS: Windows NT...`, `W_Init: Init WADfiles...`) is sent to the null device while `game.init()` runs, so test and training output stays readable. Add `--engine-log` to `src.train`, `src.evaluate` or `src.play` (or `EnvConfig(silence_engine=False)`) to see it. |
+| `Error: Checkpoint not found: ...zip` | Wrong path or the file was never written. Paths are relative to the directory you run from; Stable-Baselines3 stores models as `<name>.zip`, so `checkpoints/latest` usually needs the `.zip`. |
 
 ---
 

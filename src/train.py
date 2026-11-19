@@ -179,6 +179,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Low-memory preset (frame_stack=1, n_steps=256, batch_size=32, CPU).",
     )
     parser.add_argument(
+        "--engine-log",
+        action="store_true",
+        help="Show the ViZDoom engine log (hidden by default; it is very noisy).",
+    )
+    parser.add_argument(
         "--render",
         action="store_true",
         help="Show the ViZDoom window while training (needs a display).",
@@ -369,6 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[Config] Error: {exc}", file=sys.stderr)
         return 2
 
+    env_cfg.silence_engine = not args.engine_log
     set_global_seeds(args.seed)
     scenario = SCENARIOS[args.scenario]
 
@@ -383,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"the checkpoint was trained with frame_stack={stored_cfg.frame_stack}."
                 )
             stored_cfg.window_visible = args.render
+            stored_cfg.silence_engine = not args.engine_log
             env_cfg = stored_cfg
             print(f"[Resume] Loaded env config from {resume_path}.env.json")
         else:
