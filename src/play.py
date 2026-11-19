@@ -4,6 +4,9 @@ Uses a visible ViZDoom window when a display is available and falls back to
 headless mode automatically.  The environment configuration is taken from the
 checkpoint's ``.env.json`` sidecar so the agent always sees the observations it
 was trained on.
+
+Works identically on Ubuntu (GPU or CPU) and Windows PowerShell: the model
+runs on ``--device auto`` (CUDA when available) while ViZDoom renders on CPU.
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--device",
         default="auto",
         choices=["auto", "cuda", "cpu"],
-        help="PyTorch device to use.",
+        help="PyTorch device to use (default: auto — CUDA on Ubuntu GPU, else CPU).",
     )
     return parser.parse_args(argv)
 
@@ -78,11 +81,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.random and not args.checkpoint:
         print("Error: provide --checkpoint <path> or --random.")
         return 2
+    if args.episodes < 1:
+        print("Error: --episodes must be >= 1.")
+        return 2
+    if args.sleep < 0:
+        print("Error: --sleep must be >= 0.")
+        return 2
 
     display_available = has_display()
     window_visible = display_available and not args.headless
     if not window_visible:
-        reason = "--headless requested" if args.headless else "no DISPLAY/WAYLAND_DISPLAY detected"
+        reason = "--headless requested" if args.headless else "no display detected"
         print(f"[Display] Running headless ({reason}).")
     else:
         print("[Display] Display detected; opening the ViZDoom window.")
@@ -99,7 +108,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 silence_engine=not args.engine_log,
             )
             model = load_ppo_model(args.checkpoint, device=args.device)
-        except (FileNotFoundError, ValueError) as exc:
+        except SystemExit as exc:
+            print(f"Error: {exc}")
+            return 2
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Error: {exc}")
             return 2
     else:
@@ -117,6 +129,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"Error: action space mismatch: checkpoint {model.action_space} vs "
                 f"environment {env.action_space}."
+            )
+            return 2
+        if model is not None and model.observation_space.shape != env.observation_space.shape:
+            print(
+                f"Error: observation shape mismatch: checkpoint "
+                f"{model.observation_space.shape} vs environment "
+                f"{env.observation_space.shape}. Pass --frame-stack to match."
             )
             return 2
 

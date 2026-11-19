@@ -9,16 +9,26 @@ Every run gets its own timestamped directory::
         best_model.zip                      # best deterministic evaluation
         <scenario>_final.zip                # saved at the end / on Ctrl-C
         *.env.json                          # sidecar env config for each model
+        *.train.json                        # sidecar training config for each model
     checkpoints/<scenario>_latest.zip       # stable pointer to the newest model
 
-The sidecar ``.env.json`` records the exact observation/action configuration so
-``evaluate`` and ``play`` reproduce it instead of guessing.
+The sidecars record the exact observation/action configuration and the PPO
+hyper-parameters so ``evaluate`` and ``play`` reproduce them instead of
+guessing, and ``--resume`` can warn when flags differ from the original run.
+
+Cross-platform / GPU
+--------------------
+* Works on Ubuntu (primary, GPU workstation) and Windows PowerShell (laptop).
+  ``SubprocVecEnv`` always uses ``spawn`` so it behaves identically on both
+  (Windows has no ``fork``).
+* ``--device auto`` (default) uses CUDA on Ubuntu when available and CPU
+  elsewhere.  ``--low-ram`` forces CPU for the 2 GB laptop.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import contextlib
 import os
 import random
 import shutil
@@ -49,13 +59,16 @@ from src.config import (
     SCENARIOS,
     EnvConfig,
     TrainConfig,
+    atomic_write_json,
     build_configs,
     load_env_config_for_model,
+    load_train_config_for_model,
     save_env_config_for_model,
+    save_train_config_for_model,
     scenario_names,
 )
 from src.env import VizDoomEnv, has_display
-from src.model import create_ppo_model, resolve_device
+from src.model import create_ppo_model, gpu_info, resolve_device
 
 
 class OutcomeCounterCallback(BaseCallback):
@@ -87,6 +100,37 @@ class OutcomeCounterCallback(BaseCallback):
         return f"{total} episodes: " + ", ".join(parts)
 
 
+class CheckpointWithSidecarCallback(CheckpointCallback):
+    """``CheckpointCallback`` that also writes ``.env.json``/``.train.json``.
+
+    Stock ``CheckpointCallback`` saves only the ``.zip``.  Without sidecars,
+    periodic checkpoints cannot be evaluated (the fallback guesses
+    ``frame_stack=4`` and mismatches ``--low-ram`` runs).  This subclass
+    writes both sidecars next to every periodic checkpoint, so crash-recovery
+    checkpoints are directly usable with ``evaluate``/``play``.
+    """
+
+    def __init__(
+        self,
+        env_cfg: EnvConfig,
+        train_cfg: TrainConfig,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._env_cfg = env_cfg
+        self._train_cfg = train_cfg
+
+    def _on_step(self) -> bool:
+        result = super()._on_step()
+        if self.n_calls % self.save_freq == 0:
+            model_path = self._checkpoint_path(extension="zip")
+            if os.path.exists(model_path):
+                save_env_config_for_model(self._env_cfg, model_path)
+                save_train_config_for_model(self._train_cfg, model_path)
+        return result
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train PPO on ViZDoom.",
@@ -111,7 +155,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--device",
         default=None,
         choices=["auto", "cuda", "cpu"],
-        help="PyTorch device (default: auto).",
+        help="PyTorch device (default: auto — CUDA on Ubuntu GPU, else CPU).",
     )
     parser.add_argument(
         "--n-steps",
@@ -137,7 +181,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--n-envs",
         type=int,
         default=None,
-        help="Number of parallel ViZDoom processes (default: 1).",
+        help="Number of parallel ViZDoom processes (default: 1). "
+        "On the Ubuntu GPU workstation use 4-8; on the 2 GB laptop keep 1.",
     )
     parser.add_argument(
         "--checkpoint-freq",
@@ -208,38 +253,72 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
-class SigtermToInterrupt:
-    """Turn SIGTERM into KeyboardInterrupt so cleanup/saving still happens.
+def _interruptible_signals() -> list[int]:
+    """Signals that should trigger a clean save (platform-dependent).
 
-    Without this, ``timeout``/systemd/job schedulers kill the Python process and
-    leave the ViZDoom child processes orphaned.  Those orphans also inherit the
-    parent's stdout pipe, which can hang whatever supervises the run.
+    Linux: ``SIGTERM`` (``timeout``/systemd) + ``SIGINT`` (Ctrl-C).
+    Windows: ``SIGINT`` (Ctrl-C) + ``SIGBREAK`` (Ctrl-Break) + ``SIGTERM``
+    where available.  Without this, schedulers kill the process and leave
+    ViZDoom children orphaned.
+    """
+    signals = []
+    for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signals.append(sig)
+    return signals
+
+
+class SigtermToInterrupt:
+    """Turn termination signals into KeyboardInterrupt so saving still happens.
+
+    Without this, ``timeout``/systemd/job schedulers kill the Python process
+    and leave the ViZDoom child processes orphaned.  Those orphans also
+    inherit the parent's stdout pipe, which can hang whatever supervises
+    the run.  Works on both Linux and Windows (PowerShell).
     """
 
     def __init__(self) -> None:
-        self._previous: Any = None
+        self._previous: dict[int, Any] = {}
 
     def __enter__(self) -> SigtermToInterrupt:
-        self._previous = signal.getsignal(signal.SIGTERM)
-
         def _handler(signum: int, frame: Any) -> None:
             raise KeyboardInterrupt
 
-        signal.signal(signal.SIGTERM, _handler)
+        for sig in _interruptible_signals():
+            try:
+                self._previous[sig] = signal.getsignal(sig)
+                signal.signal(sig, _handler)
+            except (ValueError, OSError, RuntimeError):  # pragma: no cover - non-main thread
+                pass
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
-        if self._previous is not None:
-            signal.signal(signal.SIGTERM, self._previous)
+        for sig, prev in self._previous.items():
+            with contextlib.suppress(ValueError, OSError, RuntimeError):
+                signal.signal(sig, prev)
 
 
 def set_global_seeds(seed: int) -> None:
-    """Seed every RNG we can reach, so short runs are reproducible."""
+    """Seed every RNG we can reach, so short runs are reproducible.
+
+    Seeds Python, NumPy, and PyTorch (CPU *and* CUDA when available) and
+    pins cuDNN to deterministic mode.  Note: CUDA kernels with
+    non-deterministic algorithms can still vary run-to-run; set
+    ``CUBLAS_WORKSPACE_CONFIG=:4096:8`` for stricter determinism.
+    """
     import torch
 
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:  # pragma: no cover - very old torch
+        pass
 
 
 def make_vec_env(
@@ -248,7 +327,14 @@ def make_vec_env(
     monitor_path: str | None = None,
     info_keywords: Sequence[str] = ("is_success",),
 ) -> VecEnv:
-    """Create ``n_envs`` ViZDoom instances with distinct, reproducible seeds."""
+    """Create ``n_envs`` ViZDoom instances with distinct, reproducible seeds.
+
+    ``n_envs == 1`` uses :class:`DummyVecEnv` (in-process, cheapest).
+    ``n_envs > 1`` uses :class:`SubprocVecEnv` with ``spawn`` — the only
+    start method that works identically on Windows and Linux.  Workers are
+    CPU-only (ViZDoom rendering); the PPO model may still run on CUDA in
+    the main process.
+    """
     factories: list[Callable[[], Any]] = []
     for rank in range(n_envs):
         worker_cfg = replace(env_cfg, seed=env_cfg.seed + rank)
@@ -302,13 +388,14 @@ def unique_dir(path: str) -> str:
 
 
 def promote_to_latest(model_path: str, save_dir: str, scenario: str) -> str:
-    """Copy ``model_path`` (and its sidecar) to the stable ``_latest`` name."""
+    """Copy ``model_path`` (and its sidecars) to the stable ``_latest`` name."""
     os.makedirs(save_dir, exist_ok=True)
     latest = latest_pointer_path(save_dir, scenario)
     shutil.copyfile(model_path, latest)
-    sidecar = f"{model_path}.env.json"
-    if os.path.exists(sidecar):
-        shutil.copyfile(sidecar, f"{latest}.env.json")
+    for suffix in (".env.json", ".train.json"):
+        sidecar = f"{model_path}{suffix}"
+        if os.path.exists(sidecar):
+            shutil.copyfile(sidecar, f"{latest}{suffix}")
     return latest
 
 
@@ -329,14 +416,60 @@ def _package_versions() -> dict[str, str]:
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    atomic_write_json(path, payload)
 
 
-def _save_model_and_sidecar(model: PPO, path: str, env_cfg: EnvConfig) -> None:
+def _save_model_and_sidecar(
+    model: PPO, path: str, env_cfg: EnvConfig, train_cfg: TrainConfig | None = None
+) -> None:
     model.save(path)
     save_env_config_for_model(env_cfg, path)
+    if train_cfg is not None:
+        save_train_config_for_model(train_cfg, path)
+
+
+def _warn_on_resume_drift(
+    args: argparse.Namespace,
+    stored_env: EnvConfig,
+    resume_path: str,
+    train_cfg: TrainConfig,
+) -> None:
+    """Warn about CLI flags that will be ignored because the sidecar wins."""
+    for flag, cli_val, stored_val in (
+        ("--frame-stack", args.frame_stack, stored_env.frame_stack),
+        ("--frame-skip", args.frame_skip, stored_env.frame_skip),
+    ):
+        if cli_val is not None and cli_val != stored_val:
+            print(
+                f"[Resume] Note: {flag} {cli_val} ignored; "
+                f"the checkpoint was trained with {flag[2:].replace('-', '_')}={stored_val}."
+            )
+    stored_train = load_train_config_for_model(resume_path)
+    if stored_train is not None:
+        diffs = [
+            f"{name}: CLI={getattr(train_cfg, name)!r} vs checkpoint={getattr(stored_train, name)!r}"
+            for name in (
+                "n_steps",
+                "batch_size",
+                "n_epochs",
+                "learning_rate",
+                "gamma",
+                "gae_lambda",
+                "clip_range",
+                "ent_coef",
+                "n_envs",
+                "device",
+            )
+            if getattr(train_cfg, name) != getattr(stored_train, name)
+        ]
+        if diffs:
+            print(
+                "[Resume] Note: training hyper-parameters differ from the "
+                "checkpoint's .train.json (PPO hyper-parameters are restored "
+                "from the checkpoint; device and run-control flags use CLI values):"
+            )
+            for line in diffs:
+                print(f"           {line}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -344,8 +477,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.render and not has_display():
         print(
-            "[Display] Error: --render needs a display, but no DISPLAY/"
-            "WAYLAND_DISPLAY was found. Re-run without --render.",
+            "[Display] Error: --render needs a display, but no display was "
+            "detected (DISPLAY/WAYLAND_DISPLAY on Linux, interactive session "
+            "on Windows). Re-run without --render.",
             file=sys.stderr,
         )
         return 2
@@ -380,14 +514,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     resume_path: str | None = None
     if args.resume:
-        resume_path = resolve_resume_path(args.resume, args.save_dir, args.scenario)
-        stored_cfg = load_env_config_for_model(resume_path)
+        try:
+            resume_path = resolve_resume_path(args.resume, args.save_dir, args.scenario)
+        except SystemExit as exc:
+            print(f"[Resume] Error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            stored_cfg = load_env_config_for_model(resume_path)
+        except ValueError as exc:
+            print(f"[Resume] Error: {exc}", file=sys.stderr)
+            return 2
         if stored_cfg is not None:
-            if args.frame_stack is not None and args.frame_stack != stored_cfg.frame_stack:
-                print(
-                    f"[Resume] Note: --frame-stack {args.frame_stack} ignored; "
-                    f"the checkpoint was trained with frame_stack={stored_cfg.frame_stack}."
-                )
+            try:
+                _warn_on_resume_drift(args, stored_cfg, resume_path, train_cfg)
+            except ValueError as exc:
+                print(f"[Resume] Error: {exc}", file=sys.stderr)
+                return 2
             stored_cfg.window_visible = args.render
             stored_cfg.silence_engine = not args.engine_log
             env_cfg = stored_cfg
@@ -418,17 +560,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"Target:         {train_cfg.total_timesteps:,} timesteps "
         f"({train_cfg.n_envs} env(s), n_steps={train_cfg.n_steps}, batch={train_cfg.batch_size})"
     )
+    info = gpu_info()
+    if info["cuda_available"]:
+        print(f"Device:         CUDA ({info['device_name']}, {info['total_memory_mb']} MB)")
+    else:
+        print("Device:         CPU (no CUDA GPU detected)")
 
-    vec_env = make_vec_env(
-        env_cfg,
-        train_cfg.n_envs,
-        monitor_path=os.path.join(run_log_dir, "monitor.csv"),
-    )
-    eval_env = make_vec_env(
-        replace(env_cfg, seed=env_cfg.seed + 1000, window_visible=False),
-        1,
-        monitor_path=os.path.join(run_log_dir, "eval_monitor.csv"),
-    )
+    vec_env: VecEnv | None = None
+    eval_env: VecEnv | None = None
+    try:
+        vec_env = make_vec_env(
+            env_cfg,
+            train_cfg.n_envs,
+            monitor_path=os.path.join(run_log_dir, "monitor.csv"),
+        )
+        eval_env = make_vec_env(
+            replace(env_cfg, seed=env_cfg.seed + 1000, window_visible=False),
+            1,
+            monitor_path=os.path.join(run_log_dir, "eval_monitor.csv"),
+        )
+    except Exception as exc:
+        print(f"[Env] Error: failed to create environments: {exc}", file=sys.stderr)
+        if vec_env is not None:
+            vec_env.close()
+        if eval_env is not None:
+            eval_env.close()
+        return 2
     action_names: list[str] = list(vec_env.get_attr("action_names")[0])
     print(f"Actions:        {', '.join(action_names)}")
 
@@ -470,19 +627,34 @@ def _run_training(
     try:
         if resume_path:
             device = resolve_device(train_cfg.device)
-            model = PPO.load(resume_path, env=vec_env, device=device)
+            try:
+                model = PPO.load(resume_path, env=vec_env, device=device)
+            except Exception as exc:
+                print(f"[Resume] Error: failed to load {resume_path!r}: {exc}", file=sys.stderr)
+                return 2
             if model.action_space != vec_env.action_space:
-                raise SystemExit(
-                    "Checkpoint action space "
+                print(
+                    "[Resume] Error: Checkpoint action space "
                     f"({model.action_space}) does not match the environment "
                     f"({vec_env.action_space}). The scenario or action catalogue "
-                    "changed since this checkpoint was trained; retrain from scratch."
+                    "changed since this checkpoint was trained; retrain from scratch.",
+                    file=sys.stderr,
                 )
+                return 2
             if model.observation_space.shape != vec_env.observation_space.shape:
-                raise SystemExit(
-                    f"Checkpoint observation shape {model.observation_space.shape} "
-                    f"!= environment {vec_env.observation_space.shape}."
+                print(
+                    "[Resume] Error: Checkpoint observation shape "
+                    f"{model.observation_space.shape} != environment "
+                    f"{vec_env.observation_space.shape}.",
+                    file=sys.stderr,
                 )
+                return 2
+            # PPO.load restores optimizer/rollout settings. Record those actual
+            # values rather than the fresh-run defaults supplied by the CLI.
+            for name in ("n_steps", "batch_size", "n_epochs", "gamma", "gae_lambda", "ent_coef"):
+                setattr(train_cfg, name, getattr(model, name))
+            train_cfg.learning_rate = float(model.lr_schedule(1.0))
+            train_cfg.clip_range = float(model.clip_range(1.0))
             start_timesteps = int(model.num_timesteps)
             print(f"[Resume] Continuing from {start_timesteps:,} timesteps.")
         else:
@@ -508,7 +680,9 @@ def _run_training(
         callbacks: list[BaseCallback] = []
         checkpoint_freq = max(1, train_cfg.checkpoint_freq // train_cfg.n_envs)
         callbacks.append(
-            CheckpointCallback(
+            CheckpointWithSidecarCallback(
+                env_cfg,
+                train_cfg,
                 save_freq=checkpoint_freq,
                 save_path=run_ckpt_dir,
                 name_prefix=f"{args.scenario}_ckpt",
@@ -549,7 +723,7 @@ def _run_training(
             return 130
         print("\n[Interrupted] Saving current model...")
         final_path = os.path.join(run_ckpt_dir, f"{args.scenario}_final.zip")
-        _save_model_and_sidecar(model, final_path, env_cfg)
+        _save_model_and_sidecar(model, final_path, env_cfg, train_cfg)
         promote_to_latest(final_path, args.save_dir, args.scenario)
         print(f"[Interrupted] Progress saved to: {final_path}")
         return 130
@@ -557,6 +731,7 @@ def _run_training(
         best_candidate = os.path.join(run_ckpt_dir, "best_model.zip")
         if os.path.exists(best_candidate):
             save_env_config_for_model(env_cfg, best_candidate)
+            save_train_config_for_model(train_cfg, best_candidate)
 
         vec_env.close()
         eval_env.close()
@@ -566,7 +741,7 @@ def _run_training(
         return 1
 
     final_path = os.path.join(run_ckpt_dir, f"{args.scenario}_final.zip")
-    _save_model_and_sidecar(model, final_path, env_cfg)
+    _save_model_and_sidecar(model, final_path, env_cfg, train_cfg)
     latest_path = promote_to_latest(final_path, args.save_dir, args.scenario)
 
     _write_json(
@@ -575,7 +750,7 @@ def _run_training(
             "run_name": run_name,
             "finished_at": datetime.now().isoformat(timespec="seconds"),
             "scenario": args.scenario,
-            "argv": sys.argv,
+            "argv": vars(args),
             "num_timesteps": int(model.num_timesteps),
             "env_config": env_cfg.to_dict(),
             "train_config": asdict(train_cfg),
@@ -583,6 +758,7 @@ def _run_training(
             "observation_shape": list(env_cfg.observation_shape),
             "episode_outcomes": outcome_counter.counts,
             "packages": _package_versions(),
+            "gpu": gpu_info(),
         },
     )
 

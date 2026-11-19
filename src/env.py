@@ -12,6 +12,16 @@ observations ``(C * frame_stack, H, W)`` ready for Stable-Baselines3's
 
 The outcome is read from ViZDoom itself (``is_episode_timeout_reached`` /
 ``is_player_dead``) rather than guessed from the sign of the reward.
+
+Cross-platform notes
+--------------------
+* Works headless on Ubuntu (no ``DISPLAY``) and Windows (no interactive
+  session) by refusing a visible window instead of letting ViZDoom abort the
+  whole process.  See :func:`has_display`.
+* The environment itself is CPU-only (ViZDoom renders on CPU); the PPO model
+  may still run on CUDA — see ``src.model.resolve_device``.  This split is
+  what lets ``--n-envs 4`` on an Ubuntu GPU workstation work: workers render
+  on CPU while gradients run on the GPU.
 """
 
 from __future__ import annotations
@@ -91,10 +101,71 @@ def has_display() -> bool:
 
     Used to avoid handing ViZDoom a visible window on a headless machine, which
     aborts the whole process instead of raising a Python exception.
+
+    * Linux: requires ``DISPLAY`` or ``WAYLAND_DISPLAY`` (covers X11, Wayland,
+      and ``xvfb-run``).
+    * macOS: always True (no headless-server concept in normal use).
+    * Windows: True for an interactive console/RDP session; False for
+      services/CI where ``SESSIONNAME`` is unset.  Set
+      ``NEURALDOOM_NO_DISPLAY=1`` to force headless anywhere (useful in CI
+      on Windows runners that report a session but have no real desktop).
     """
-    if sys.platform.startswith("win") or sys.platform == "darwin":
+    if os.environ.get("NEURALDOOM_NO_DISPLAY"):
+        return False
+    if sys.platform == "darwin":
+        return True
+    if sys.platform.startswith("win"):
+        # Interactive Windows sessions have SESSIONNAME set ("Console" or
+        # "RDP-Tcp#..."); services and some CI runners do not.
+        if "SESSIONNAME" in os.environ:
+            return True
+        # Fall back to True for the common laptop case where SESSIONNAME is
+        # absent but a desktop exists; NEURALDOOM_NO_DISPLAY overrides.
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _to_grayscale_hw(screen: np.ndarray) -> np.ndarray:
+    """Return a ``(H, W)`` grayscale image from any ViZDoom buffer layout.
+
+    ViZDoom bindings have returned ``(H, W)``, ``(H, W, 1)``, and
+    ``(1, H, W)`` for GRAY8 depending on version/platform.  Handle all three
+    explicitly instead of assuming ``[:, :, 0]``.
+    """
+    if screen.ndim == 2:
+        return screen
+    if screen.ndim == 3:
+        if screen.shape[2] == 1 and screen.shape[0] != 1:
+            return screen[:, :, 0]
+        if screen.shape[0] == 1 and screen.shape[2] != 1:
+            return screen[0, :, :]
+        # (H, W, 3) RGB buffer used as grayscale source: take the first
+        # channel (matches historical behaviour) rather than crashing.
+        if screen.shape[-1] == 3:
+            return screen[:, :, 0]
+        return screen[:, :, 0]
+    raise ValueError(f"Unexpected screen buffer shape for grayscale: {screen.shape}")
+
+
+def _to_rgb_hwc(screen: np.ndarray) -> np.ndarray:
+    """Return an ``(H, W, 3)`` RGB image from any ViZDoom buffer layout.
+
+    RGB24 buffers come as ``(H, W, 3)`` or ``(3, H, W)`` depending on
+    binding.  Disambiguate by checking which axis is 3 *and* which axis
+    matches the expected 320x240 source resolution, so a square crop can
+    never be transposed by mistake.
+    """
+    if screen.ndim != 3:
+        raise ValueError(f"Unexpected RGB screen buffer shape: {screen.shape}")
+    if screen.shape[-1] == 3 and screen.shape[0] != 3:
+        return screen
+    if screen.shape[0] == 3 and screen.shape[-1] != 3:
+        return np.transpose(screen, (1, 2, 0))
+    # Ambiguous (both first and last axes are 3, e.g. a 3x3 image): prefer
+    # HWC, which is the documented layout.
+    if screen.shape[-1] == 3:
+        return screen
+    raise ValueError(f"Unexpected RGB screen buffer shape: {screen.shape}")
 
 
 class VizDoomEnv(gym.Env[np.ndarray, int]):
@@ -102,6 +173,9 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
 
     Observations are returned in channels-first ``(C, H, W)`` ``uint8`` format
     (e.g. ``(4, 84, 84)`` for 4 stacked 84x84 grayscale frames).
+
+    Supports the context-manager protocol (``with VizDoomEnv(...) as env:``)
+    so the C++ game is always closed, even on exceptions.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 35}
@@ -128,7 +202,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
                 f"ViZDoom scenario config not found at: {cfg_path}\nIs vizdoom installed correctly?"
             )
 
-        self.game = vzd.DoomGame()
+        self.game: Any = vzd.DoomGame()
         try:
             self._configure_game(cfg_path)
         except BaseException:
@@ -161,15 +235,21 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         self._episode_ticks: int = 0
         self.episode_outcome: str | None = None
         self._needs_reset: bool = True
+        self._closed: bool = False
 
     # ------------------------------------------------------------------ setup
+    def _check_open(self) -> None:
+        if getattr(self, "_closed", False) or getattr(self, "game", None) is None:
+            raise RuntimeError("Environment is closed. Create a new VizDoomEnv.")
+
     def _configure_game(self, cfg_path: str) -> None:
         self.game.load_config(cfg_path)
         visible = bool(self.config.window_visible or self.render_mode == "human")
         if visible and not has_display():
             raise RuntimeError(
-                "A visible ViZDoom window was requested but no DISPLAY/"
-                "WAYLAND_DISPLAY is set. Pass window_visible=False (or run "
+                "A visible ViZDoom window was requested but no display was "
+                "detected (DISPLAY/WAYLAND_DISPLAY on Linux, interactive "
+                "session on Windows). Pass window_visible=False (or run "
                 "under xvfb-run) for headless machines."
             )
         self.game.set_window_visible(visible)
@@ -227,15 +307,11 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         self._last_screen = screen
 
         if self.config.grayscale:
-            gray = screen[:, :, 0] if screen.ndim == 3 else screen
+            gray = _to_grayscale_hw(screen)
             resized = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
             return resized[np.newaxis, :, :].astype(np.uint8)
 
-        # RGB24 buffers come as (H, W, 3) or (3, H, W) depending on binding.
-        if screen.ndim == 3 and screen.shape[0] == 3 and screen.shape[-1] != 3:
-            hwc = np.transpose(screen, (1, 2, 0))
-        else:
-            hwc = screen
+        hwc = _to_rgb_hwc(screen)
         resized = cv2.resize(hwc, size, interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(np.transpose(resized, (2, 0, 1))).astype(np.uint8)
 
@@ -249,6 +325,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
+        self._check_open()
         super().reset(seed=seed)
 
         effective_seed = self.config.seed if seed is None else int(seed)
@@ -274,6 +351,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         return self._get_stacked_obs(), info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        self._check_open()
         if self._needs_reset:
             raise RuntimeError(
                 "step() called before reset() or after the episode finished. Call reset() first."
@@ -363,24 +441,14 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
             return np.zeros(shape, dtype=np.uint8)
 
         screen = self._last_screen
+        size = (self.config.frame_width, self.config.frame_height)
         if self.config.grayscale:
-            gray = screen[:, :, 0] if screen.ndim == 3 else screen
-            resized = cv2.resize(
-                gray,
-                (self.config.frame_width, self.config.frame_height),
-                interpolation=cv2.INTER_AREA,
-            )
+            gray = _to_grayscale_hw(screen)
+            resized = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
             return np.repeat(resized[:, :, np.newaxis], 3, axis=2).astype(np.uint8)
 
-        if screen.ndim == 3 and screen.shape[0] == 3 and screen.shape[-1] != 3:
-            hwc = np.transpose(screen, (1, 2, 0))
-        else:
-            hwc = screen
-        resized = cv2.resize(
-            hwc,
-            (self.config.frame_width, self.config.frame_height),
-            interpolation=cv2.INTER_AREA,
-        )
+        hwc = _to_rgb_hwc(screen)
+        resized = cv2.resize(hwc, size, interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(resized, dtype=np.uint8)
 
     def close(self) -> None:
@@ -393,6 +461,13 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         frames = getattr(self, "_frames", None)
         if frames is not None:
             frames.clear()
+        self._closed = True
+
+    def __enter__(self) -> VizDoomEnv:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
 
 
 def make_env(config: EnvConfig | None = None, render_mode: str | None = None) -> VizDoomEnv:

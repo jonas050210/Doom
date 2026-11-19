@@ -1,10 +1,14 @@
 # Runtime dependencies.
 # Upper bounds keep PPO checkpoints loadable across installs; Stable-Baselines3
 # and ViZDoom are both sensitive to major-version changes.
+#
+# GPU: wheel selection depends on the package index/platform, not GPU detection.
+# Default PyPI wheels on Linux include CUDA libraries. A compatible NVIDIA
+# driver is still required. For CPU-only installs use setup's CPU-only flag.
 vizdoom>=1.3.0,<2.0
 gymnasium>=1.0,<2.0
 stable-baselines3>=2.3,<3.0
-torch>=2.2
+torch>=2.2,<3.0
 numpy>=1.26,<3.0
 opencv-python-headless>=4.9,<5.0
-tensorboard>=2.16
+tensorboard>=2.16,<3.0
