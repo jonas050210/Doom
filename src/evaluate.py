@@ -4,12 +4,14 @@ The environment configuration is read from the ``.env.json`` sidecar written by
 ``src.train`` next to the checkpoint, so evaluation always reproduces the exact
 observation and action space the model was trained with.  Results are printed
 and written to a JSON file for later comparison.
+
+Works identically on Ubuntu (GPU or CPU) and Windows PowerShell: the model
+runs on ``--device auto`` (CUDA when available) while ViZDoom renders on CPU.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from collections.abc import Sequence
 from datetime import datetime
@@ -17,9 +19,9 @@ from typing import Any
 
 import numpy as np
 
-from src.config import SCENARIOS, EnvConfig, resolve_checkpoint_env_config
+from src.config import SCENARIOS, EnvConfig, atomic_write_json, resolve_checkpoint_env_config
 from src.env import VizDoomEnv, has_display
-from src.model import load_ppo_model
+from src.model import gpu_info, load_ppo_model
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -41,7 +43,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--device",
         default="auto",
         choices=["auto", "cuda", "cpu"],
-        help="PyTorch device to use.",
+        help="PyTorch device to use (default: auto — CUDA on Ubuntu GPU, else CPU).",
     )
     parser.add_argument(
         "--frame-stack",
@@ -230,12 +232,11 @@ def evaluate(
         "env_config": env_cfg.to_dict(),
         "summary": summary,
         "episodes": records,
+        "gpu": gpu_info(),
     }
 
     output_path = output or f"{os.path.splitext(checkpoint_path)[0]}.eval.json"
-    with open(output_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    atomic_write_json(output_path, payload)
     print(f"Results written to: {output_path}")
 
     return payload
@@ -245,7 +246,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.render and not has_display():
         print(
-            "Error: --render needs a display, but no DISPLAY/WAYLAND_DISPLAY was found.",
+            "Error: --render needs a display, but no display was detected "
+            "(DISPLAY/WAYLAND_DISPLAY on Linux, interactive session on Windows).",
         )
         return 2
     try:
@@ -260,7 +262,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             silence_engine=not args.engine_log,
         )
-    except (ValueError, FileNotFoundError) as exc:
+    except SystemExit as exc:
+        print(f"Error: {exc}")
+        return 2
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 2
     return 0

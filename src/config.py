@@ -10,19 +10,63 @@ Design notes
   observation and action space that a model was trained with.  This is what
   prevents the classic "trained with ``--low-ram``, evaluated without it"
   mismatch.
+* :class:`TrainConfig` is persisted next to every checkpoint as
+  ``<model>.train.json`` so ``--resume`` can warn when hyper-parameters differ
+  from the original run instead of silently drifting.
 * :func:`build_configs` resolves CLI overrides against presets so that
   ``--low-ram`` only changes defaults and every explicitly passed flag wins.
+* All sidecar/JSON writes are atomic (temp file + ``os.replace``) so a crash
+  mid-write never leaves a truncated sidecar behind.  This works identically
+  on Windows and Linux.
 """
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import json
 import os
+import tempfile
 import warnings
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import Any
+
+VALID_DEVICES = ("auto", "cuda", "cpu")
+
+
+def atomic_write_json(path: str, payload: Mapping[str, Any]) -> None:
+    """Write ``payload`` as JSON to ``path`` atomically (cross-platform).
+
+    The data is written to a temporary file in the same directory and then
+    moved over ``path`` with :func:`os.replace`, which is atomic on both
+    Windows and POSIX.  A crash or ``Ctrl-C`` mid-write therefore leaves
+    either the old file or the new file — never a truncated one.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp", prefix=".neuraldoom-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(payload), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise
+
+
+def _require_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an int, got {type(value).__name__}: {value!r}")
+    return value
+
+
+def _require_float(name: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number, got {type(value).__name__}: {value!r}")
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -149,6 +193,17 @@ class EnvConfig:
 
     def __post_init__(self) -> None:
         resolve_scenario(self.scenario)
+        _require_int("frame_width", self.frame_width)
+        _require_int("frame_height", self.frame_height)
+        _require_int("frame_skip", self.frame_skip)
+        _require_int("frame_stack", self.frame_stack)
+        _require_int("seed", self.seed)
+        if not isinstance(self.grayscale, bool):
+            raise ValueError(f"grayscale must be a bool, got {self.grayscale!r}")
+        if not isinstance(self.window_visible, bool):
+            raise ValueError(f"window_visible must be a bool, got {self.window_visible!r}")
+        if not isinstance(self.silence_engine, bool):
+            raise ValueError(f"silence_engine must be a bool, got {self.silence_engine!r}")
         if self.frame_width <= 0 or self.frame_height <= 0:
             raise ValueError("frame_width and frame_height must be positive")
         if self.frame_stack < 1:
@@ -174,25 +229,47 @@ class EnvConfig:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> EnvConfig:
-        """Rebuild a config from a mapping, ignoring unknown keys."""
+        """Rebuild a config from a mapping, ignoring unknown keys.
+
+        Raises:
+            ValueError: If ``data`` is not a mapping or a known field has
+                the wrong type (e.g. a hand-edited sidecar with
+                ``"frame_stack": "4"``).
+        """
+        if not isinstance(data, Mapping):
+            raise ValueError(f"EnvConfig sidecar must be a JSON object, got {type(data).__name__}")
         known = {f.name for f in fields(cls)}
         unknown = set(data) - known
         if unknown:
             warnings.warn(f"Ignoring unknown EnvConfig keys: {sorted(unknown)}", stacklevel=2)
-        return cls(**{key: data[key] for key in data if key in known})
+        try:
+            return cls(**{key: data[key] for key in data if key in known})
+        except TypeError as exc:
+            raise ValueError(f"Invalid EnvConfig sidecar: {exc}") from exc
 
     def save(self, path: str) -> None:
         """Write the config as JSON (used for checkpoint sidecars)."""
-        directory = os.path.dirname(os.path.abspath(path))
-        os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(self.to_dict(), handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        atomic_write_json(path, self.to_dict())
 
     @classmethod
     def load(cls, path: str) -> EnvConfig:
-        with open(path, encoding="utf-8") as handle:
-            return cls.from_dict(json.load(handle))
+        """Load a config from JSON, with a clear error for corrupt files.
+
+        Raises:
+            ValueError: If the file is not valid JSON or fails validation.
+            FileNotFoundError: If the file does not exist.
+        """
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Corrupt EnvConfig sidecar {path!r}: invalid JSON ({exc}). "
+                "Delete it or retrain to regenerate it."
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Corrupt EnvConfig sidecar {path!r}: not UTF-8 ({exc}).") from exc
+        return cls.from_dict(data)
 
 
 def env_config_path_for_model(model_path: str) -> str:
@@ -208,7 +285,11 @@ def save_env_config_for_model(config: EnvConfig, model_path: str) -> str:
 
 
 def load_env_config_for_model(model_path: str) -> EnvConfig | None:
-    """Load the sidecar written by :func:`save_env_config_for_model`, if any."""
+    """Load the sidecar written by :func:`save_env_config_for_model`, if any.
+
+    Raises:
+        ValueError: If the sidecar exists but is corrupt/invalid.
+    """
     path = env_config_path_for_model(model_path)
     if not os.path.exists(path):
         return None
@@ -217,7 +298,11 @@ def load_env_config_for_model(model_path: str) -> EnvConfig | None:
 
 @dataclass
 class TrainConfig:
-    """PPO training configuration with validated defaults for 8 GB VRAM."""
+    """PPO training configuration with validated defaults for 8 GB VRAM.
+
+    ``device="auto"`` uses CUDA when available (Ubuntu workstation with an
+    NVIDIA GPU) and falls back to CPU otherwise (Windows laptop, CI).
+    """
 
     total_timesteps: int = 100_000
     n_envs: int = 1
@@ -237,18 +322,47 @@ class TrainConfig:
     device: str = "auto"
 
     def __post_init__(self) -> None:
+        _require_int("total_timesteps", self.total_timesteps)
+        _require_int("n_envs", self.n_envs)
+        _require_int("n_steps", self.n_steps)
+        _require_int("batch_size", self.batch_size)
+        _require_int("n_epochs", self.n_epochs)
+        _require_int("checkpoint_freq", self.checkpoint_freq)
+        _require_int("eval_freq", self.eval_freq)
+        _require_int("n_eval_episodes", self.n_eval_episodes)
+        _require_float("learning_rate", self.learning_rate)
+        _require_float("gamma", self.gamma)
+        _require_float("gae_lambda", self.gae_lambda)
+        _require_float("clip_range", self.clip_range)
+        _require_float("ent_coef", self.ent_coef)
         if self.total_timesteps <= 0:
             raise ValueError("total_timesteps must be > 0")
         if self.n_envs < 1:
             raise ValueError("n_envs must be >= 1")
         if self.n_steps < 1:
             raise ValueError("n_steps must be >= 1")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
         if self.n_epochs < 1:
             raise ValueError("n_epochs must be >= 1")
         if self.n_eval_episodes < 1:
             raise ValueError("n_eval_episodes must be >= 1")
         if self.checkpoint_freq < 1 or self.eval_freq < 1:
             raise ValueError("checkpoint_freq and eval_freq must be >= 1")
+        if not (self.learning_rate > 0):
+            raise ValueError("learning_rate must be > 0")
+        if not (0.0 <= self.gamma <= 1.0):
+            raise ValueError("gamma must be in [0, 1]")
+        if not (0.0 <= self.gae_lambda <= 1.0):
+            raise ValueError("gae_lambda must be in [0, 1]")
+        if not (self.clip_range > 0):
+            raise ValueError("clip_range must be > 0")
+        if not (self.ent_coef >= 0):
+            raise ValueError("ent_coef must be >= 0")
+        if not isinstance(self.device, str) or self.device.lower() not in VALID_DEVICES:
+            raise ValueError(f"device must be one of {list(VALID_DEVICES)}, got {self.device!r}")
+        # Normalise so downstream comparisons are case-insensitive.
+        self.device = self.device.lower()
 
         rollout_size = self.n_steps * self.n_envs
         if self.batch_size > rollout_size:
@@ -265,6 +379,64 @@ class TrainConfig:
     @property
     def rollout_size(self) -> int:
         return self.n_steps * self.n_envs
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> TrainConfig:
+        """Rebuild a config from a mapping, ignoring unknown keys."""
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                f"TrainConfig sidecar must be a JSON object, got {type(data).__name__}"
+            )
+        known = {f.name for f in fields(cls)}
+        unknown = set(data) - known
+        if unknown:
+            warnings.warn(f"Ignoring unknown TrainConfig keys: {sorted(unknown)}", stacklevel=2)
+        try:
+            return cls(**{key: data[key] for key in data if key in known})
+        except TypeError as exc:
+            raise ValueError(f"Invalid TrainConfig sidecar: {exc}") from exc
+
+    def save(self, path: str) -> None:
+        """Write the config as JSON (used for checkpoint sidecars)."""
+        atomic_write_json(path, self.to_dict())
+
+    @classmethod
+    def load(cls, path: str) -> TrainConfig:
+        """Load a config from JSON, with a clear error for corrupt files."""
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Corrupt TrainConfig sidecar {path!r}: invalid JSON ({exc}). "
+                "Delete it or retrain to regenerate it."
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Corrupt TrainConfig sidecar {path!r}: not UTF-8 ({exc}).") from exc
+        return cls.from_dict(data)
+
+
+def train_config_path_for_model(model_path: str) -> str:
+    """Return the training sidecar path for a checkpoint (``model.zip.train.json``)."""
+    return f"{model_path}.train.json"
+
+
+def save_train_config_for_model(config: TrainConfig, model_path: str) -> str:
+    """Persist ``config`` next to a checkpoint so resume can compare it."""
+    path = train_config_path_for_model(model_path)
+    config.save(path)
+    return path
+
+
+def load_train_config_for_model(model_path: str) -> TrainConfig | None:
+    """Load the training sidecar written by :func:`save_train_config_for_model`, if any."""
+    path = train_config_path_for_model(model_path)
+    if not os.path.exists(path):
+        return None
+    return TrainConfig.load(path)
 
 
 def get_low_ram_configs(
@@ -319,43 +491,44 @@ def build_configs(
     resolve_scenario(scenario)
 
     if low_ram:
-        env_cfg, train_cfg = get_low_ram_configs(scenario=scenario, seed=seed)
+        base_env, base_train = get_low_ram_configs(scenario=scenario, seed=seed)
     else:
-        env_cfg = EnvConfig(scenario=scenario, seed=seed)
-        train_cfg = TrainConfig()
+        base_env = EnvConfig(scenario=scenario, seed=seed)
+        base_train = TrainConfig()
 
-    env_cfg.window_visible = window_visible or env_cfg.window_visible
+    env_data = base_env.to_dict()
+    train_data = base_train.to_dict()
+
+    env_data["window_visible"] = bool(window_visible or env_data["window_visible"])
+    if frame_stack is not None:
+        env_data["frame_stack"] = frame_stack
+    if frame_skip is not None:
+        env_data["frame_skip"] = frame_skip
 
     if timesteps is not None:
-        train_cfg.total_timesteps = timesteps
-    if frame_stack is not None:
-        env_cfg.frame_stack = frame_stack
-    if frame_skip is not None:
-        env_cfg.frame_skip = frame_skip
+        train_data["total_timesteps"] = timesteps
     if n_steps is not None:
-        train_cfg.n_steps = n_steps
+        train_data["n_steps"] = n_steps
     if batch_size is not None:
-        train_cfg.batch_size = batch_size
+        train_data["batch_size"] = batch_size
     if n_envs is not None:
-        train_cfg.n_envs = n_envs
+        train_data["n_envs"] = n_envs
     if ent_coef is not None:
-        train_cfg.ent_coef = ent_coef
+        train_data["ent_coef"] = ent_coef
     if checkpoint_freq is not None:
-        train_cfg.checkpoint_freq = checkpoint_freq
+        train_data["checkpoint_freq"] = checkpoint_freq
     if eval_freq is not None:
-        train_cfg.eval_freq = eval_freq
+        train_data["eval_freq"] = eval_freq
     if n_eval_episodes is not None:
-        train_cfg.n_eval_episodes = n_eval_episodes
+        train_data["n_eval_episodes"] = n_eval_episodes
     if device is not None:
-        train_cfg.device = device
+        train_data["device"] = device
+    train_data["save_dir"] = save_dir
+    train_data["log_dir"] = log_dir
 
-    train_cfg.save_dir = save_dir
-    train_cfg.log_dir = log_dir
-
-    # Re-run dataclass validation after mutation (e.g. batch_size vs n_steps).
-    env_cfg = EnvConfig(**env_cfg.to_dict())
-    train_cfg = TrainConfig(**{f.name: getattr(train_cfg, f.name) for f in fields(TrainConfig)})
-    return env_cfg, train_cfg
+    # Single construction validates the final values exactly once (no
+    # double warning for indivisible batch sizes).
+    return EnvConfig(**env_data), TrainConfig(**train_data)
 
 
 def _checkpoint_hint(checkpoint_path: str) -> str:
@@ -392,6 +565,7 @@ def resolve_checkpoint_env_config(
     scenario: str | None = None,
     seed: int = 100,
     frame_stack: int | None = None,
+    frame_skip: int | None = None,
     window_visible: bool = False,
     silence_engine: bool | None = None,
 ) -> EnvConfig:
@@ -402,6 +576,7 @@ def resolve_checkpoint_env_config(
 
     Raises:
         SystemExit: If an explicit ``scenario`` contradicts the sidecar.
+        ValueError: If the sidecar exists but is corrupt/invalid.
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -421,6 +596,11 @@ def resolve_checkpoint_env_config(
                 f"[Config] Note: frame_stack={frame_stack} ignored; the checkpoint "
                 f"was trained with frame_stack={stored.frame_stack}."
             )
+        if frame_skip is not None and frame_skip != stored.frame_skip:
+            print(
+                f"[Config] Note: frame_skip={frame_skip} ignored; the checkpoint "
+                f"was trained with frame_skip={stored.frame_skip}."
+            )
         stored.window_visible = window_visible
         if silence_engine is not None:
             stored.silence_engine = silence_engine
@@ -433,6 +613,7 @@ def resolve_checkpoint_env_config(
     return EnvConfig(
         scenario=scenario or "my_way_home",
         frame_stack=4 if frame_stack is None else frame_stack,
+        frame_skip=4 if frame_skip is None else frame_skip,
         seed=seed,
         window_visible=window_visible,
         **({} if silence_engine is None else {"silence_engine": silence_engine}),

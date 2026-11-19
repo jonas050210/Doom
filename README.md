@@ -368,3 +368,77 @@ The fast suite covers action-matrix invariants per scenario, config validation a
 ## Scope and licensing
 
 The project ships no game assets: scenarios and Freedoom-compatible WADs come from the `vizdoom` package. No license file is included yet — add one before distributing the code, and check ViZDoom's own license (GPL-3.0 for the engine) if you plan to redistribute binaries.
+
+
+## Ubuntu GPU / Windows PowerShell setup
+
+Ubuntu is the primary training target. Use Python 3.11 or 3.12 (on Ubuntu
+24.04, the default Python 3.12 works). Install venv support first if needed:
+
+```bash
+sudo apt update
+sudo apt install python3-venv
+bash setup.sh
+source .venv/bin/activate
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+python -m src.train --scenario my_way_home --device auto --n-envs 4 --timesteps 100000
+```
+
+For NVIDIA acceleration, install Ubuntu's **recommended proprietary NVIDIA
+driver** (`ubuntu-drivers devices`, then `sudo ubuntu-drivers autoinstall`)
+and reboot first. `nvidia-smi` must work. PyTorch also needs a CUDA-enabled
+wheel compatible with the driver; wheel selection depends on the package
+index/platform, **not** on GPU detection during installation. Default Linux
+PyPI wheels include CUDA runtime libraries; a separate system CUDA toolkit
+is not required for these wheels. If CUDA remains unavailable, update the
+driver and choose the matching wheel command from PyTorch's installer.
+There is no separate game GPU unlock: ViZDoom renders on CPU, PPO's CNN and
+optimizer run on CUDA. `--device auto` selects CUDA at runtime, with CPU
+fallback. Explicit `--device cuda` also warns and falls back if unavailable.
+`--low-ram` is the CPU-oriented preset, not the GPU preset.
+
+Windows PowerShell (no Make or Bash required):
+
+```powershell
+# If local scripts are blocked, allow them for this process only:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\setup.ps1
+.\.venv\Scripts\Activate.ps1
+python -m src.play --random --headless --episodes 1
+python -m src.train --scenario my_way_home --low-ram --timesteps 2048
+```
+
+Setup installs test/lint tools by default. Runtime only: `bash setup.sh --no-dev`
+or `.\setup.ps1 -NoDev`. CPU-only wheel: `bash setup.sh --cpu-only` or
+`.\setup.ps1 -CpuOnly` (downloads from PyTorch's CPU index). These scripts
+require internet access to PyPI and, for CPU-only installs, download.pytorch.org.
+Keep separate virtual environments for Windows and Linux; never copy `.venv`
+between OSes. The PowerShell installer uses the venv Python directly, so it
+does not depend on activation succeeding.
+
+Training/evaluation are headless by default; play auto-detects a display.
+For servers/CI, use play's `--headless` or set `NEURALDOOM_NO_DISPLAY=1`
+(PowerShell: `$env:NEURALDOOM_NO_DISPLAY="1"`). Display detection is best-effort;
+`DISPLAY` or Windows session metadata alone cannot guarantee a working desktop.
+Parallel environments use `spawn` on both OSes. GPU availability and package
+versions are recorded in `run.json`; `gpu` describes hardware availability,
+while `train_config.device` records the requested device policy.
+
+All periodic/final checkpoints now include `.env.json` and `.train.json`.
+Copy the sidecars with the `.zip` when moving models between machines.
+Resume restores PPO hyperparameters from the model, with warnings if fresh-run
+CLI defaults differ; `--timesteps` remains the total target, not an increment.
+Only load trusted checkpoints: model deserialization can execute code.
+
+Verification:
+
+```bash
+python -m pytest -q                    # fast tests, including spawn workers
+python -m pytest -q -m slow            # train/resume/evaluate/play and SIGTERM
+python -m ruff check src tests
+python -m ruff format --check src tests
+```
+
+CI runs unit tests on Ubuntu and Windows with Python 3.11/3.12; end-to-end
+training and POSIX signal handling run on Ubuntu. Real CUDA hardware and the
+Windows desktop must still be verified on the target machines.
