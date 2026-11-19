@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Training artifacts, logs, checkpoints, datasets
+runs/
+checkpoints/
+logs/
+*.zip
+*.pt
+*.pth
+*.tfevents.*
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
