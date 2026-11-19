@@ -113,10 +113,10 @@ Throughput, measured (not estimated) with `--low-ram`:
 | Machine | `basic` | `my_way_home` | 100k steps of `defend_the_center` |
 |---|---|---|---|
 | 2-vCPU Linux container (`--low-ram`) | ~210 fps | ~125 fps | ~8 min |
-| **i3-1310U laptop, Windows, 2 GB free RAM** | **17-43 fps** | not measured | **40-100 min** |
+| **i3-1310U laptop, Windows, 2 GB free RAM** | 17-43 fps | not measured | **~60 min at 27 fps** |
 | i7-12700F + RTX 4060 Ti, Ubuntu | not measured | not measured | not measured |
 
-The laptop number is a real measurement that replaced an earlier ~210 fps assumption (which came from the container and was wrong for the laptop by 5-10x). The spread between 17 and 43 fps is what the machine actually produces run to run - it tracks whatever else is running (browser, Windows background work), so expect the low end while other apps are open. That is why the laptop is the *check that it learns* machine and the workstation is the *train the research model* machine.
+The laptop numbers are real measurements that replaced an earlier ~210 fps assumption (which came from the container and was wrong for the laptop by 5-10x). A steady `defend_the_center` run on the i3-1310U holds **26-28 fps**, i.e. roughly **5 minutes per 8,000 steps** and ~60 minutes for 100k; readings between 17 and 43 fps occur depending on background load (browser, Windows updates), so expect the low end when other apps are open. `--low-ram` is *not* the reason for that speed: it only shrinks the rollout buffers, the batch and the frame stack, and in the container the default and low-ram presets both run at ~200 fps - the laptop is limited by the CPU running ViZDoom, not by the preset. Keep it anyway, it halves the memory. That is why the laptop is the *check that it learns* machine and the workstation is the *train the research model* machine.
 
 Thread tuning was tried and rejected: `OMP_NUM_THREADS=1` gave 206 fps, `=2` gave 195 fps and the default 200 fps in the container, so there is no flag worth adding.
 
@@ -261,14 +261,16 @@ python -m src.train --scenario my_way_home --low-ram --timesteps 2048
 # 3. look at it
 python -m src.evaluate --checkpoint checkpoints/my_way_home_latest.zip --episodes 3
 
-# 4. shooting training (40-100 min on the laptop; see throughput table) - verified recipe
+# 4. shooting training (~60 min on the laptop, 15 min for the first 25k) - verified recipe
 python -m src.train --scenario defend_the_center --low-ram --n-steps 512 --ent-coef 0.05 --timesteps 100000 --eval-freq 25000 --checkpoint-freq 25000 --n-eval-episodes 5
 python -m src.evaluate --checkpoint checkpoints/defend_the_center_latest.zip --episodes 10
 ```
 
 Keep the browser closed while training; ~810 MB is half of your free RAM.
 
-Because the shooting run is 40-100 minutes there, know that stopping it is safe: `Ctrl-C` saves the current policy (``checkpoints/defend_the_center_final.zip``) and `--resume` continues from it later, and `--checkpoint-freq 25000` writes an intermediate model every 25k steps that you can `--evaluate` straight away to see whether the reward is climbing.
+Rough laptop budget at the measured 26-28 fps: **5 min ≈ 8,000 steps**, 15 min ≈ 25,000, 60 min ≈ 100,000.
+
+Because the shooting run is ~60 minutes there, know that stopping it is safe: `Ctrl-C` saves the current policy (``checkpoints/defend_the_center_final.zip``) and `--resume` continues from it later, and `--checkpoint-freq 25000` writes an intermediate model every 25k steps that you can `--evaluate` straight away to see whether the reward is climbing.
 
 ### Does it actually learn to shoot?
 
