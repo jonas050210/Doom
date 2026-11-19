@@ -4,14 +4,43 @@ import argparse
 from datetime import datetime
 import os
 
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.config import EnvConfig, SCENARIOS, TrainConfig, get_low_ram_configs
 from src.env import VizDoomEnv
-from src.model import create_ppo_model
+from src.model import create_ppo_model, resolve_device
+
+
+class BestModelCallback(BaseCallback):
+    """Save only the best model (by rolling mean episode reward) to save disk space."""
+
+    def __init__(self, best_path: str, check_freq: int = 1024, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.best_path = best_path
+        self.check_freq = max(1, check_freq)
+        self.best_mean_reward = -float("inf")
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.check_freq != 0:
+            return True
+        if len(self.model.ep_info_buffer) == 0:
+            return True
+
+        mean_reward = sum(ep["r"] for ep in self.model.ep_info_buffer) / len(
+            self.model.ep_info_buffer
+        )
+        if mean_reward > self.best_mean_reward:
+            self.best_mean_reward = mean_reward
+            self.model.save(self.best_path)
+            if self.verbose > 0:
+                print(
+                    f"[BestModel] New best mean reward: {mean_reward:.3f} -> saved {self.best_path}"
+                )
+        return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +111,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show the ViZDoom window during training so you can watch the agent learn live.",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Start training from scratch instead of resuming from the last checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -124,30 +158,45 @@ def main() -> None:
 
     vec_env = DummyVecEnv([_init_env])
 
-    model = create_ppo_model(
-        env=vec_env,
-        train_config=train_cfg,
-        seed=args.seed,
-        tensorboard_log=run_log_dir,
-    )
+    final_path = os.path.join(args.save_dir, f"{args.scenario}_final.zip")
+    best_path = os.path.join(args.save_dir, f"{args.scenario}_best.zip")
+    resuming = os.path.exists(final_path) and not args.fresh
+
+    if resuming:
+        device = resolve_device(train_cfg.device)
+        print(f"[Resume] Loading existing checkpoint: {final_path}")
+        model = PPO.load(final_path, env=vec_env, device=device)
+    else:
+        model = create_ppo_model(
+            env=vec_env,
+            train_config=train_cfg,
+            seed=args.seed,
+            tensorboard_log=run_log_dir,
+        )
+
     logger = configure(run_log_dir, ["stdout", "csv", "tensorboard"])
     model.set_logger(logger)
 
-    checkpoint_cb = CheckpointCallback(
-        save_freq=max(1, args.checkpoint_freq),
-        save_path=run_ckpt_dir,
-        name_prefix=f"ppo_{args.scenario}",
+    best_cb = BestModelCallback(
+        best_path=best_path,
+        check_freq=max(1, args.checkpoint_freq),
     )
 
     print(f"Starting PPO training on '{args.scenario}' for {args.timesteps} timesteps...")
-    print(f"Logs:        {run_log_dir}")
-    print(f"Checkpoints: {run_ckpt_dir}")
+    print(f"Logs:       {run_log_dir}")
+    print(f"Best model: {best_path}")
 
     try:
-        model.learn(total_timesteps=args.timesteps, callback=checkpoint_cb)
-        final_path = os.path.join(args.save_dir, f"{args.scenario}_final.zip")
+        model.learn(
+            total_timesteps=args.timesteps,
+            callback=best_cb,
+            reset_num_timesteps=not resuming,
+        )
         model.save(final_path)
         print(f"\nTraining complete. Final model saved to: {final_path}")
+    except KeyboardInterrupt:
+        model.save(final_path)
+        print(f"\n[Interrupted] Progress saved to: {final_path}")
     finally:
         vec_env.close()
 
