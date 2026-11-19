@@ -9,7 +9,7 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.config import EnvConfig, SCENARIOS, TrainConfig
+from src.config import EnvConfig, SCENARIOS, TrainConfig, get_low_ram_configs
 from src.env import VizDoomEnv
 from src.model import create_ppo_model
 
@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         default="runs",
         help="Directory for TensorBoard and CSV logs.",
     )
+    parser.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Use low-RAM preset (frame_stack=1, n_steps=256, batch_size=32, CPU) for 2 GB RAM laptops.",
+    )
     return parser.parse_args()
 
 
@@ -85,16 +90,22 @@ def main() -> None:
     os.makedirs(run_log_dir, exist_ok=True)
     os.makedirs(run_ckpt_dir, exist_ok=True)
 
-    env_cfg = EnvConfig(scenario=args.scenario, seed=args.seed, window_visible=False)
-    train_cfg = TrainConfig(
-        total_timesteps=args.timesteps,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        checkpoint_freq=args.checkpoint_freq,
-        save_dir=run_ckpt_dir,
-        log_dir=run_log_dir,
-        device=args.device,
-    )
+    if args.low_ram:
+        env_cfg, train_cfg = get_low_ram_configs(scenario=args.scenario, seed=args.seed)
+        train_cfg.total_timesteps = args.timesteps if args.timesteps != 100_000 else train_cfg.total_timesteps
+        train_cfg.save_dir = run_ckpt_dir
+        train_cfg.log_dir = run_log_dir
+    else:
+        env_cfg = EnvConfig(scenario=args.scenario, seed=args.seed, window_visible=False)
+        train_cfg = TrainConfig(
+            total_timesteps=args.timesteps,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            checkpoint_freq=args.checkpoint_freq,
+            save_dir=run_ckpt_dir,
+            log_dir=run_log_dir,
+            device=args.device,
+        )
 
     def _init_env():
         env = VizDoomEnv(config=env_cfg)

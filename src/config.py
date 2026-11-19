@@ -58,3 +58,22 @@ class TrainConfig:
     save_dir: str = "checkpoints"
     log_dir: str = "runs"
     device: str = "auto"
+
+
+def get_low_ram_configs(scenario: str = "my_way_home", seed: int = 42) -> tuple[EnvConfig, TrainConfig]:
+    """Return memory-minimized configs for 2 GB RAM laptops (e.g. i3-1215U)."""
+    env_cfg = EnvConfig(
+        scenario=scenario,
+        frame_stack=1,
+        window_visible=False,
+        seed=seed,
+    )
+    train_cfg = TrainConfig(
+        total_timesteps=2_048,
+        n_steps=256,
+        batch_size=32,
+        n_epochs=2,
+        checkpoint_freq=1_024,
+        device="cpu",
+    )
+    return env_cfg, train_cfg

@@ -64,3 +64,13 @@ def test_health_gathering_scenario():
                 obs, _ = env.reset()
     finally:
         env.close()
+
+
+def test_low_ram_frame_stack_one():
+    env = VizDoomEnv(EnvConfig(scenario="my_way_home", frame_stack=1, window_visible=False))
+    try:
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (1, 84, 84)
+        assert obs.dtype == np.uint8
+    finally:
+        env.close()
