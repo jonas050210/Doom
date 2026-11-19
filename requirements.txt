@@ -1,8 +1,10 @@
-vizdoom>=1.2.4
-gymnasium>=0.29.1
-stable-baselines3>=2.3.2
-torch>=2.2.0
-numpy>=1.26.0
-opencv-python-headless>=4.9.0
-tensorboard>=2.16.0
-pytest>=8.0.0
+# Runtime dependencies.
+# Upper bounds keep PPO checkpoints loadable across installs; Stable-Baselines3
+# and ViZDoom are both sensitive to major-version changes.
+vizdoom>=1.3.0,<2.0
+gymnasium>=1.0,<2.0
+stable-baselines3>=2.3,<3.0
+torch>=2.2
+numpy>=1.26,<3.0
+opencv-python-headless>=4.9,<5.0
+tensorboard>=2.16

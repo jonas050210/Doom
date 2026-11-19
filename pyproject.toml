@@ -1,0 +1,28 @@
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -m 'not slow'"
+markers = ["slow: end-to-end tests that train/evaluate a model (pytest -m slow)"]
+filterwarnings = [
+    "error::DeprecationWarning:src.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "runs", "checkpoints"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RET"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # function call in default arg is fine for argparse/dataclasses
+    "RET504", # explicit intermediate variables often read better
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
