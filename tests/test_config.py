@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+from pathlib import Path
 
 import pytest
 import vizdoom as vzd
@@ -27,17 +29,19 @@ def test_every_scenario_has_a_shipped_cfg_file():
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
-def test_declared_timeout_matches_vizdoom(name):
-    """Our documented timeout must match what ViZDoom actually loads."""
+def test_declared_timeout_matches_shipped_cfg(name):
+    """Our documented timeout must match the value in the shipped ``.cfg``.
+
+    Read from the file rather than by booting the engine: this keeps the fast
+    suite snappy and saves five engine start-ups (which are noisy on Windows).
+    ``tests/test_env.py`` checks the same number against a live engine via
+    ``get_episode_timeout()``.
+    """
     spec = SCENARIOS[name]
-    game = vzd.DoomGame()
-    game.load_config(os.path.join(vzd.scenarios_path, spec.cfg_file))
-    game.set_window_visible(False)
-    try:
-        game.init()
-        assert game.get_episode_timeout() == spec.episode_timeout_ticks
-    finally:
-        game.close()
+    cfg = Path(vzd.scenarios_path, spec.cfg_file).read_text(encoding="utf-8")
+    match = re.search(r"^\s*episode_?timeout\s*=\s*(\d+)", cfg, re.IGNORECASE | re.MULTILINE)
+    assert match, f"{spec.cfg_file} has no episode_timeout"
+    assert int(match.group(1)) == spec.episode_timeout_ticks
 
 
 def test_unknown_scenario_lists_alternatives():

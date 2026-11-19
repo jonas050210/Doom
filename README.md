@@ -322,7 +322,7 @@ python -m pytest --cov=src        # with coverage
 ruff check src tests && ruff format --check src tests
 ```
 
-A passing run prints only test progress: the ViZDoom engine banner is suppressed during `game.init()` (see Troubleshooting), so pytest output is readable on Windows too.
+A passing run prints mostly test progress. The ViZDoom engine's own start-up log is suppressed before every `game.init()` (see Troubleshooting); on Windows a few lines per engine start-ups still come through, because the engine prints them before it has read any configuration at all.
 
 The fast suite covers action-matrix invariants per scenario, config validation and sidecar round-trips, observation determinism and frame stacking, termination-vs-truncation semantics, device handling, CLI parsing, resume-path logic, and evaluation summaries. `.github/workflows/ci.yml` runs lint plus the full suite on Python 3.11 and 3.12, and the end-to-end smoke job separately.
 
@@ -348,7 +348,7 @@ The fast suite covers action-matrix invariants per scenario, config validation a
 | Checkpoint won't load (`action space mismatch`) | The scenario or action catalogue changed since training. Retrain, or evaluate with the scenario it was trained on. |
 | `setup.sh` fails on Python 3.13+ | Prebuilt `vizdoom`/`torch` wheels may not exist yet; use 3.11 or 3.12. |
 | Training is slow on one env | `--n-envs 2`/`4` runs parallel ViZDoom processes; each adds ~200 MB RAM. |
-| The ViZDoom engine log is hidden | Intentional: the engine banner (`OS: Windows NT...`, `W_Init: Init WADfiles...`) is sent to the null device while `game.init()` runs, so test and training output stays readable. Add `--engine-log` to `src.train`, `src.evaluate` or `src.play` (or `EnvConfig(silence_engine=False)`) to see it. |
+| ViZDoom prints `W_Init: Init WADfiles...` / `viz_controlled is write protected.` all over the terminal | Each environment hands the engine a throwaway config that already contains `viz_noconsole=1`, so the engine is quiet from its first config read onwards. Add `--engine-log` to `src.train`, `src.evaluate` or `src.play` (or `EnvConfig(silence_engine=False)`) to get the full log back. A few lines per engine start-up can still appear: the engine prints its version/`D_DoomInit`/`M_LoadDefaults` banner *before* it reads any configuration, and on Windows it writes that output straight into the parent console from a child process created with `inherit_handles=FALSE`, so no Python-side redirection can catch it. |
 | `Error: Checkpoint not found: ...zip` | Wrong path or the file was never written. Paths are relative to the directory you run from; Stable-Baselines3 stores models as `<name>.zip`, so `checkpoints/latest` usually needs the `.zip`. |
 
 ---
