@@ -6,39 +6,47 @@ the reward sign.
 """
 
 import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from src.config import EnvConfig
-from src.env import VizDoomEnv, suppressed_stdio
+from src.env import VizDoomEnv, silent_engine_ini_path
 
 
-def test_suppressed_stdio_hides_prints_and_restores_stdout(capsys):
-    """The engine banner goes to fd 1, so silencing must work at that level."""
-    real_stdout = os.dup(1)
-    try:
-        with suppressed_stdio():
-            os.write(1, b"this must not be visible\n")
-        os.dup2(real_stdout, 1)
-        print("stdout is back")
-        assert "stdout is back" in capsys.readouterr().out
-        assert "this must not be visible" not in capsys.readouterr().out
-    finally:
-        os.dup2(real_stdout, 1)
-        os.close(real_stdout)
+def test_silent_engine_ini_requests_noconsole(tmp_path, monkeypatch):
+    """The engine only stays quiet if its config says so before it boots."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path), raising=False)
+    path = silent_engine_ini_path()
+
+    text = Path(path).read_text(encoding="utf-8")
+    assert "[GlobalSettings]" in text
+    assert "viz_noconsole=1" in text
+    assert Path(path).parent == tmp_path
 
 
-def test_suppressed_stdio_restores_after_an_exception():
-    real_stdout = os.dup(1)
-    try:
-        with pytest.raises(RuntimeError), suppressed_stdio():
-            raise RuntimeError("boom")
-        assert os.isatty(1) == os.isatty(real_stdout)
-    finally:
-        os.dup2(real_stdout, 1)
-        os.close(real_stdout)
+def test_silent_engine_ini_is_unique_per_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path), raising=False)
+    assert silent_engine_ini_path() != silent_engine_ini_path()
+
+
+def test_silent_env_points_the_engine_at_its_own_config(make_env):
+    env = make_env(scenario="basic", silence_engine=True)
+    config_path = env.game.get_doom_config_path()
+
+    assert os.path.basename(config_path).startswith("neuraldoom-engine-")
+    assert "viz_noconsole=1" in Path(config_path).read_text(encoding="utf-8")
+
+
+def test_engine_log_env_keeps_the_default_config(make_env):
+    env = make_env(scenario="basic", silence_engine=False)
+
+    # ``--engine-log`` must not move the engine's config file around; an empty
+    # path is how ViZDoom reports "use the default _vizdoom.ini in the cwd".
+    assert env.game.get_doom_config_path() == ""
 
 
 def test_env_can_init_with_engine_log_visible(make_env):
