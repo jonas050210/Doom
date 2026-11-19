@@ -108,6 +108,16 @@ Peak memory measured for a `--low-ram` run (frames 84x84, one stacked frame, `n_
 
 So `--low-ram` needs roughly **1 GB**. That fits the laptop's 2 GB *if* you close the browser/other apps while training; the integrated GPU's "4 GB shared memory" is irrelevant because PyTorch runs on the CPU and a full frame buffer here is about 400 KB.
 
+What the preset is worth, measured on the same container (peak RSS of the whole process tree, and end-to-end wall clock for 8,192 `defend_the_center` steps *including* interpreter start-up):
+
+| Preset | Peak RSS | 8,192 steps | Steps/s |
+|---|---|---|---|
+| `--low-ram` (frame_stack=1, `n_steps=256`, `batch_size=32`) | **865 MB** | 53.6 s | **153** |
+| defaults (frame_stack=4, `n_steps=2048`, `batch_size=64`) | 897 MB | 68.1 s | 120 |
+| frame_stack=4, `n_steps=512`, `batch_size=32` | 839 MB | 76.7 s | 107 |
+
+Two things follow. First, the memory is dominated by the Python/torch/Stable-Baselines3 baseline (~800 MB), so dropping `--low-ram` costs only ~30-60 MB, not hundreds - you need about **0.9-1 GB either way**. Second, `--low-ram` is ~25% *faster* per step: its one-channel input is cheaper to run and its smaller batch (32) means fewer, smaller gradient updates per step, which dominates over the extra forward passes of the default preset. The reason to keep it on the laptop is therefore headroom and speed, not that the default preset would not fit.
+
 Throughput, measured (not estimated) with `--low-ram`:
 
 | Machine | `basic` | `my_way_home` | 100k steps of `defend_the_center` |
@@ -116,7 +126,7 @@ Throughput, measured (not estimated) with `--low-ram`:
 | **i3-1310U laptop, Windows, 2 GB free RAM** | 17-43 fps | not measured | **~60 min at 27 fps** |
 | i7-12700F + RTX 4060 Ti, Ubuntu | not measured | not measured | not measured |
 
-The laptop numbers are real measurements that replaced an earlier ~210 fps assumption (which came from the container and was wrong for the laptop by 5-10x). A steady `defend_the_center` run on the i3-1310U holds **26-28 fps**, i.e. roughly **5 minutes per 8,000 steps** and ~60 minutes for 100k; readings between 17 and 43 fps occur depending on background load (browser, Windows updates), so expect the low end when other apps are open. `--low-ram` is *not* the reason for that speed: it only shrinks the rollout buffers, the batch and the frame stack, and in the container the default and low-ram presets both run at ~200 fps - the laptop is limited by the CPU running ViZDoom, not by the preset. Keep it anyway, it halves the memory. That is why the laptop is the *check that it learns* machine and the workstation is the *train the research model* machine.
+The laptop numbers are real measurements that replaced an earlier ~210 fps assumption (which came from the container and was wrong for the laptop by 5-10x). A steady `defend_the_center` run on the i3-1310U holds **26-28 fps**, i.e. roughly **5 minutes per 8,000 steps** and ~60 minutes for 100k; readings between 17 and 43 fps occur depending on background load (browser, Windows updates), so expect the low end when other apps are open. `--low-ram` is *not* the reason for that speed: the laptop is limited by the CPU running ViZDoom, and in the container the preset only shifts throughput by ~25% (see the preset table above). Keep it anyway - it is faster and it leaves more of your 2 GB free. That is why the laptop is the *check that it learns* machine and the workstation is the *train the research model* machine.
 
 Thread tuning was tried and rejected: `OMP_NUM_THREADS=1` gave 206 fps, `=2` gave 195 fps and the default 200 fps in the container, so there is no flag worth adding.
 
