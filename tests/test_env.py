@@ -74,3 +74,25 @@ def test_low_ram_frame_stack_one():
         assert obs.dtype == np.uint8
     finally:
         env.close()
+
+
+@pytest.mark.parametrize("scenario", ["basic", "defend_the_center", "deadly_corridor"])
+def test_combat_scenarios(scenario):
+    env = VizDoomEnv(
+        EnvConfig(
+            scenario=scenario,
+            frame_stack=1,
+            include_use_attack=True,
+            window_visible=False,
+        )
+    )
+    try:
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (1, 84, 84)
+        assert env.action_space.n == 7
+        for _ in range(5):
+            obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
+            if terminated or truncated:
+                obs, _ = env.reset()
+    finally:
+        env.close()
