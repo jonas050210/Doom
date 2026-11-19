@@ -65,6 +65,7 @@ def evaluate(
         EnvConfig(
             scenario=scenario,
             frame_stack=1 if low_ram else 4,
+            include_use_attack=bool(SCENARIOS[scenario].get("combat", False)),
             seed=seed,
             window_visible=False,
         )

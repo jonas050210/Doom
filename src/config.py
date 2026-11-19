@@ -8,19 +8,41 @@ from dataclasses import dataclass
 from typing import Dict
 
 
-SCENARIOS: Dict[str, Dict[str, str]] = {
+SCENARIOS: Dict[str, Dict[str, object]] = {
     "my_way_home": {
         "cfg": "my_way_home.cfg",
+        "combat": False,
         "description": (
-            "Free maze/navigation scenario: reach the goal vest in a series of "
-            "rooms with a small time penalty per step."
+            "Level 1 (Navigation): Reach the goal vest in a maze with a small "
+            "time penalty per step."
         ),
     },
     "health_gathering": {
         "cfg": "health_gathering.cfg",
+        "combat": False,
         "description": (
-            "Free survival/navigation scenario: collect health packs to survive "
-            "as long as possible on a damaging floor."
+            "Level 2 (Survival): Collect health packs to survive on a damaging floor."
+        ),
+    },
+    "basic": {
+        "cfg": "basic.cfg",
+        "combat": True,
+        "description": (
+            "Level 3 (Combat Intro): Strafe/turn and shoot a single monster in a room."
+        ),
+    },
+    "defend_the_center": {
+        "cfg": "defend_the_center.cfg",
+        "combat": True,
+        "description": (
+            "Level 4 (Arena Combat): Turn and shoot approaching monsters from all sides."
+        ),
+    },
+    "deadly_corridor": {
+        "cfg": "deadly_corridor.cfg",
+        "combat": True,
+        "description": (
+            "Level 5 (Hard Combat): Navigate a corridor of monsters to reach the vest."
         ),
     },
 }

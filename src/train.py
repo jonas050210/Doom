@@ -96,7 +96,12 @@ def main() -> None:
         train_cfg.save_dir = run_ckpt_dir
         train_cfg.log_dir = run_log_dir
     else:
-        env_cfg = EnvConfig(scenario=args.scenario, seed=args.seed, window_visible=False)
+        env_cfg = EnvConfig(
+            scenario=args.scenario,
+            include_use_attack=bool(SCENARIOS[args.scenario].get("combat", False)),
+            seed=args.seed,
+            window_visible=False,
+        )
         train_cfg = TrainConfig(
             total_timesteps=args.timesteps,
             n_steps=args.n_steps,

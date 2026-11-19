@@ -103,6 +103,7 @@ def main() -> None:
         EnvConfig(
             scenario=args.scenario,
             frame_stack=1 if args.low_ram else 4,
+            include_use_attack=bool(SCENARIOS[args.scenario].get("combat", False)),
             seed=args.seed,
             window_visible=window_visible,
         )
