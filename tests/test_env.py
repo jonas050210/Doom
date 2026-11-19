@@ -209,3 +209,26 @@ def test_close_is_idempotent(make_env):
 def test_timeout_ticks_match_scenario(make_env):
     env = make_env("basic")
     assert env.timeout_ticks == 300
+
+
+def test_episode_time_ticks_are_reported_for_every_outcome():
+    """ViZDoom zeroes its tic counter when a goal ends the episode.
+
+    Regression: ``info["episode_time_ticks"]`` used to be 0 for goal episodes,
+    which made logged episode durations wrong.
+    """
+    env = VizDoomEnv(EnvConfig(scenario="basic", frame_stack=1, seed=0))
+    try:
+        seen = {}
+        for episode in range(20):
+            env.reset(seed=episode)
+            while True:
+                _, _, terminated, truncated, info = env.step(env.action_space.sample())
+                if terminated or truncated:
+                    seen.setdefault(info["episode_outcome"], info["episode_time_ticks"])
+                    break
+        assert seen, "no episode finished"
+        for outcome, ticks in seen.items():
+            assert ticks > 0, f"{outcome} episode reported {ticks} tics"
+    finally:
+        env.close()

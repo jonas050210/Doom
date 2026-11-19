@@ -126,6 +126,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="PPO minibatch size (default: 64, low-ram: 32).",
     )
     parser.add_argument(
+        "--ent-coef",
+        type=float,
+        default=None,
+        help="PPO entropy coefficient (default: 0.01). Raise to ~0.05 for combat "
+        "scenarios, where a policy that never shoots can score better than one "
+        "that shoots randomly and the agent learns to stop shooting.",
+    )
+    parser.add_argument(
         "--n-envs",
         type=int,
         default=None,
@@ -348,6 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             n_steps=args.n_steps,
             batch_size=args.batch_size,
             n_envs=args.n_envs,
+            ent_coef=args.ent_coef,
             checkpoint_freq=args.checkpoint_freq,
             eval_freq=args.eval_freq,
             n_eval_episodes=args.n_eval_episodes,

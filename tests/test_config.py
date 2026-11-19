@@ -165,6 +165,7 @@ def test_explicit_flags_override_low_ram_preset():
         n_envs=2,
         checkpoint_freq=250,
         eval_freq=250,
+        ent_coef=0.05,
         device="cuda",
     )
     assert env_cfg.frame_stack == 2
@@ -174,9 +175,25 @@ def test_explicit_flags_override_low_ram_preset():
     assert train_cfg.n_envs == 2
     assert train_cfg.checkpoint_freq == 250
     assert train_cfg.eval_freq == 250
+    assert train_cfg.ent_coef == 0.05
     assert train_cfg.device == "cuda"
 
 
 def test_build_configs_rejects_unknown_scenario():
     with pytest.raises(ValueError, match="Unknown scenario"):
         build_configs("does_not_exist")
+
+
+@pytest.mark.parametrize(
+    "scenario,has_goal",
+    [
+        ("my_way_home", True),
+        ("health_gathering", False),
+        ("basic", True),
+        ("defend_the_center", False),
+        ("deadly_corridor", True),
+    ],
+)
+def test_has_goal_matches_scenario_semantics(scenario, has_goal):
+    """Scenarios without a goal state must not pretend goal_rate means anything."""
+    assert SCENARIOS[scenario].has_goal is has_goal

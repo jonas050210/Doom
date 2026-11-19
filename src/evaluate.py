@@ -203,7 +203,10 @@ def evaluate(
         f"+/- {summary['std_reward']:.3f} "
         f"(min {summary['min_reward']:.3f}, max {summary['max_reward']:.3f})"
     )
-    print(f"Goal rate:          {summary['goal_rate']:.1f}%")
+    if SCENARIOS[env_cfg.scenario].has_goal:
+        print(f"Goal rate:          {summary['goal_rate']:.1f}%")
+    else:
+        print("Goal rate:          n/a (this scenario has no goal state)")
     print(f"Death rate:         {summary['death_rate']:.1f}%")
     print(f"Timeout rate:       {summary['timeout_rate']:.1f}%")
     print(f"Mean episode length:{summary['mean_length']:.1f} steps")
@@ -212,6 +215,8 @@ def evaluate(
     payload: dict[str, Any] = {
         "checkpoint": checkpoint_path,
         "scenario": env_cfg.scenario,
+        "has_goal": SCENARIOS[env_cfg.scenario].has_goal,
+        "success_signal": SCENARIOS[env_cfg.scenario].success_signal,
         "evaluated_at": datetime.now().isoformat(timespec="seconds"),
         "env_config": env_cfg.to_dict(),
         "summary": summary,

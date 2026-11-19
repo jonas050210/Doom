@@ -67,6 +67,8 @@ def test_evaluate_writes_report(basic_checkpoint, tmp_path):
     payload = evaluate(checkpoint, episodes=1, seed=5, device="cpu")
 
     assert payload["scenario"] == "basic"
+    assert payload["has_goal"] is True
+    assert payload["success_signal"]
     assert payload["summary"]["episodes"] == 1
     assert payload["env_config"]["frame_stack"] == 1
     assert len(payload["episodes"]) == 1

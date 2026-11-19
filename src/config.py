@@ -33,6 +33,7 @@ class ScenarioSpec:
     combat: bool
     description: str
     success_signal: str
+    has_goal: bool
     episode_timeout_ticks: int
     reward_range: tuple[float, float]
 
@@ -55,6 +56,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         description=("Level 1 (Navigation): find the goal vest in a maze of coloured rooms."),
         success_signal="reached the goal vest (+1); timeouts are not successes",
         episode_timeout_ticks=2100,
+        has_goal=True,
         reward_range=(-0.25, 1.0),
     ),
     "health_gathering": ScenarioSpec(
@@ -64,6 +66,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         description=("Level 2 (Survival): collect medkits to survive on a damaging floor."),
         success_signal=("no goal exists; the score is survival time (+1/tic, -100 on death)"),
         episode_timeout_ticks=2100,
+        has_goal=False,
         reward_range=(-105.0, 2105.0),
     ),
     "basic": ScenarioSpec(
@@ -73,6 +76,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         description=("Level 3 (Combat intro): strafe and shoot a single monster in a room."),
         success_signal="killed the monster (+106); -1/tic and -5/shot otherwise",
         episode_timeout_ticks=300,
+        has_goal=True,
         reward_range=(-320.0, 112.0),
     ),
     "defend_the_center": ScenarioSpec(
@@ -82,6 +86,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         description=("Level 4 (Arena combat): turn and shoot monsters closing in from all sides."),
         success_signal="each kill is +1 and the episode always ends in death (-1)",
         episode_timeout_ticks=2100,
+        has_goal=False,
         reward_range=(-2.0, 30.0),
     ),
     "deadly_corridor": ScenarioSpec(
@@ -91,6 +96,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         description=("Level 5 (Hard combat): fight down a corridor of monsters to reach the vest."),
         success_signal="reached the vest (+1000); death is -100 and shaping is +/-dX",
         episode_timeout_ticks=2100,
+        has_goal=True,
         reward_range=(-1100.0, 1010.0),
     ),
 }
@@ -291,6 +297,7 @@ def build_configs(
     n_steps: int | None = None,
     batch_size: int | None = None,
     n_envs: int | None = None,
+    ent_coef: float | None = None,
     checkpoint_freq: int | None = None,
     eval_freq: int | None = None,
     n_eval_episodes: int | None = None,
@@ -327,6 +334,8 @@ def build_configs(
         train_cfg.batch_size = batch_size
     if n_envs is not None:
         train_cfg.n_envs = n_envs
+    if ent_coef is not None:
+        train_cfg.ent_coef = ent_coef
     if checkpoint_freq is not None:
         train_cfg.checkpoint_freq = checkpoint_freq
     if eval_freq is not None:

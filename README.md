@@ -48,6 +48,8 @@ Each saved model gets a `<model>.zip.env.json` sidecar with the observation shap
 
 Because the scenarios have such different reward scales, **do not compare mean rewards across scenarios**; compare goal/timeout/death rates instead.
 
+A quirk worth knowing for `basic` (the shooting scenario): the living penalty (-1/tic) and -5 per shot mean a *slow* win still ends with a negative total reward. Measured with a random policy: a 5-step kill scores **+83**, a 30-step kill scores **-47**, a timeout scores about **-360**. Judge combat progress by **goal rate**, not by reward. Random actions already win ~60% of `basic` episodes (the monster stands in front and one hit kills it), so `basic` is a plumbing/behaviour check, not a hard benchmark.
+
 ---
 
 ## Project layout
@@ -82,6 +84,36 @@ NeuralDoom-Lab/
 
 ---
 
+## Hardware profiles
+
+The project is used on two very different machines. These are the settings that actually fit each one.
+
+| | Laptop (test rig) | Workstation (full runs) |
+|---|---|---|
+| OS | Windows 11 | Ubuntu Linux |
+| CPU | Intel Core i3-1310U (2P + 8E cores) | Intel Core i7-12700F (8P + 4E) |
+| RAM | **2 GB free** for the project | 32 GB DDR4 |
+| GPU | integrated, 4 GB *shared* system memory | NVIDIA RTX 4060 Ti, 8 GB VRAM |
+| PyTorch device | `cpu` (no CUDA) | `cuda` |
+| Preset | `--low-ram`, short runs (2k-20k steps) | defaults, 100k+ steps |
+| Purpose | check the pipeline and whether the agent learns at all | actual training and research numbers |
+
+Peak memory measured for a `--low-ram` run (frames 84x84, one stacked frame, `n_steps=256`, `batch_size=32`):
+
+| Component | Peak RSS |
+|---|---|
+| Python (torch + Stable-Baselines3 + ViZDoom bindings) | ~775 MB |
+| ViZDoom game processes (train + eval env) | ~35 MB |
+| **Total** | **~810 MB** |
+
+So `--low-ram` needs roughly **1 GB**. That fits the laptop's 2 GB *if* you close the browser/other apps while training; the integrated GPU's "4 GB shared memory" is irrelevant because PyTorch runs on the CPU and a full frame buffer here is about 400 KB.
+
+Throughput measured on a 2-vCPU container (comparable to the laptop's P-core count): ~**210 fps** on `basic`, ~**125 fps** on `my_way_home` with `--low-ram`. That means 20k timesteps of `basic` take roughly 2 minutes, and 100k would take ~8 minutes of pure training time.
+
+On a 2-core laptop keep `--n-envs 1` (parallel envs only add RAM and CPU contention). On the 4060 Ti use `--n-envs 4`-`8`.
+
+---
+
 ## Quickstart
 
 ### Linux / macOS
@@ -96,17 +128,22 @@ source .venv/bin/activate
 ### Windows (PowerShell)
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\setup.ps1
+cd Doom
+git switch main
+git pull
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # first time only
+.\setup.ps1                                                 # first time only
 .\.venv\Scripts\Activate.ps1
 ```
+
+(Windows paths are case-insensitive, so `cd doom` works as well.)
 
 Both scripts end by importing `vizdoom`, `gymnasium`, `stable_baselines3`, `torch`, and `src.config`, so a broken install fails immediately instead of on your first training run.
 
 ### Verify
 
 ```bash
-python -m pytest -q              # ~90 fast tests, about 10 s
+python -m pytest -q              # ~95 fast tests, about 10 s
 python -m src.play --random --episodes 1
 ```
 
@@ -130,6 +167,14 @@ python -m src.train --scenario basic --render --timesteps 5000
 ```
 
 `--low-ram` only changes **defaults** (`frame_stack=1`, `n_steps=256`, `batch_size=32`, `device=cpu`). Any flag you pass explicitly wins.
+
+For combat scenarios there is one tuning knob that matters more than the rest:
+
+```bash
+python -m src.train --scenario basic --timesteps 100000 --ent-coef 0.05
+```
+
+`--ent-coef` (default `0.01`) controls how much the policy keeps exploring. In `basic` the reward structure punishes shooting (-5 per shot) while a kill pays +106, so "never shoot and time out" (reward -300) beats "shoot randomly" (-360). A short run can therefore converge to an agent that stands still and never fires. Raising the entropy coefficient and training longer both help it break out of that local optimum.
 
 ### Resume
 
@@ -183,6 +228,76 @@ Runs are timestamped and never overwrite each other (a run started in the same s
 `Ctrl-C` **and** `SIGTERM` (what `timeout`, systemd, and most schedulers send) both save the current model and shut the ViZDoom processes down cleanly, so interrupting a run never leaves stray game processes behind.
 
 > Loading a checkpoint runs `torch.load` underneath, which unpickles code. Only load models you produced yourself or trust.
+
+---
+
+## Running on the two reference machines
+
+### Laptop (2 GB free RAM, iGPU) - smoke tests and "does it learn?"
+
+```powershell
+cd Doom
+git switch main
+git pull
+.\.venv\Scripts\Activate.ps1
+
+# 1. pipeline check (~10 s, no training)
+python -m pytest -q
+python -m src.play --random --episodes 1
+
+# 2. shortest real training run (~20 s)
+python -m src.train --scenario my_way_home --low-ram --timesteps 2048
+
+# 3. look at it
+python -m src.evaluate --checkpoint checkpoints/my_way_home_latest.zip --episodes 3
+
+# 4. shooting training (~8 min) - the recipe that is verified to work
+python -m src.train --scenario defend_the_center --low-ram --n-steps 512 --ent-coef 0.05 --timesteps 100000 --eval-freq 25000 --checkpoint-freq 25000 --n-eval-episodes 5
+python -m src.evaluate --checkpoint checkpoints/defend_the_center_latest.zip --episodes 10
+```
+
+Keep the browser closed while training; ~810 MB is half of your free RAM.
+
+### Does it actually learn to shoot?
+
+Everything here was measured on a 2-vCPU container with `--low-ram` (CPU only, ~0.8 GB RAM):
+
+| Run | Steps | Deterministic evaluation |
+|---|---|---|
+| random policy, `defend_the_center` | 0 | reward ≈ **-0.2** (roughly zero kills) |
+| random policy, `basic` | 0 | kills the monster in ~60% of episodes |
+| `basic`, default settings | 20k | reward **-300.0**, 0% kills (never fires) |
+| `basic`, `--ent-coef 0.05` | 20k | reward **-300.0**, 0% kills (never fires) |
+| `defend_the_center`, default settings | 20k | reward **-1.0** (never fires) |
+| `defend_the_center`, `--n-steps 512 --ent-coef 0.05` | 100k | reward **+17.1 ± 1.3** (~17 kills per episode) |
+
+What this means for a laptop-sized budget:
+
+* **`defend_the_center` is the shooting scenario to use.** Its reward pays directly for kills (+1 each, -1 for dying), so the gradient points at shooting.
+* **`basic` is a trap for short runs.** Not shooting times out at -300, shooting randomly scores about -360, so the agent learns to stand still. It is a good pipeline check (random actions already win ~60%), a poor learning demo.
+* **20k steps is not enough** for a deterministic shooting policy; the policy still spreads probability mass over actions. Around 100k steps (~8 minutes at ~230 fps) it visibly commits: 4 kills at 25k steps, 17 at 50k.
+* `--low-ram` with `--n-steps 512` still stays around 0.85 GB RAM, so it fits the laptop.
+
+### Workstation (i7-12700F, 32 GB, RTX 4060 Ti 8 GB, Ubuntu)
+
+```bash
+cd Doom
+git switch main && git pull
+source .venv/bin/activate
+
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+
+# fast, focused combat run with parallel envs
+python -m src.train --scenario basic --timesteps 300000 --n-envs 4 --eval-freq 20000
+
+# navigation benchmark
+python -m src.train --scenario my_way_home --timesteps 1000000 --n-envs 8 --eval-freq 25000
+
+# resume later
+python -m src.train --scenario my_way_home --resume --timesteps 2000000
+
+tensorboard --logdir runs
+```
 
 ---
 

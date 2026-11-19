@@ -106,6 +106,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         self._last_screen: np.ndarray | None = None
         self._episode_reward: float = 0.0
         self._episode_steps: int = 0
+        self._episode_ticks: int = 0
         self.episode_outcome: str | None = None
         self._needs_reset: bool = True
 
@@ -187,6 +188,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
 
         self._episode_reward = 0.0
         self._episode_steps = 0
+        self._episode_ticks = max(0, self._episode_time())
         self.episode_outcome = None
         self._needs_reset = False
 
@@ -215,6 +217,12 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
         self._episode_reward += reward
         self._episode_steps += 1
 
+        # ViZDoom reports 0 tics once a goal ends the episode, so remember the
+        # last valid counter value instead of reporting a misleading zero.
+        current_ticks = self._episode_time()
+        if current_ticks > 0:
+            self._episode_ticks = current_ticks
+
         done = bool(self.game.is_episode_finished())
         if done:
             self.episode_outcome = self._classify_episode_end()
@@ -234,7 +242,7 @@ class VizDoomEnv(gym.Env[np.ndarray, int]):
             "scenario": self.config.scenario,
             "episode_reward": self._episode_reward,
             "episode_steps": self._episode_steps,
-            "episode_time_ticks": self._episode_time(),
+            "episode_time_ticks": self._episode_ticks,
             "episode_outcome": self.episode_outcome,
             "is_success": self.episode_outcome == "goal",
         }

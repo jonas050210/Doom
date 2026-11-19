@@ -6,6 +6,7 @@ the tests that prove the whole pipeline still works after a refactor.
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -81,66 +82,80 @@ def test_train_resume_evaluate_play(tmp_path):
     )
 
 
-def test_sigterm_saves_and_reaps_vizdoom(tmp_path):
-    """SIGTERM (from ``timeout``/systemd/CI) must save and leave no orphans.
+def _count_vizdoom_processes() -> int:
+    """Count live ViZDoom game processes (Linux only; 0 elsewhere)."""
+    import sys
 
-    The orphan check is implicit: ViZDoom children inherit the stdout pipe, so
-    ``communicate()`` would hang until the timeout if they survived.
-    """
+    if not sys.platform.startswith("linux"):
+        return 0
+    try:
+        listing = subprocess.run(
+            ["ps", "-eo", "args"], capture_output=True, text=True, check=False
+        ).stdout
+    except OSError:  # pragma: no cover - ps missing
+        return 0
+    return sum(1 for line in listing.splitlines() if "vizdoom -iwad" in line)
+
+
+def test_sigterm_saves_and_reaps_vizdoom(tmp_path):
+    """SIGTERM (from ``timeout``/systemd/CI) must save and leave no orphans."""
     import signal
     import subprocess
     import sys
-    import threading
     import time
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[1]
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-u",
-            "-m",
-            "src.train",
-            "--scenario",
-            "basic",
-            "--timesteps",
-            "200000",
-            "--frame-stack",
-            "1",
-            "--device",
-            "cpu",
-            "--save-dir",
-            str(tmp_path / "ckpt"),
-            "--log-dir",
-            str(tmp_path / "runs"),
-        ],
-        cwd=str(repo_root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    log_path = tmp_path / "train.log"
+    before = _count_vizdoom_processes()
 
-    lines: list[str] = []
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "-m",
+                "src.train",
+                "--scenario",
+                "basic",
+                "--timesteps",
+                "200000",
+                "--frame-stack",
+                "1",
+                "--device",
+                "cpu",
+                "--save-dir",
+                str(tmp_path / "ckpt"),
+                "--log-dir",
+                str(tmp_path / "runs"),
+            ],
+            cwd=str(repo_root),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
-    def _drain() -> None:
-        for line in process.stdout:  # type: ignore[union-attr]
-            lines.append(line)
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if process.poll() is not None:
+                break
+            if "Training for" in log_path.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.2)
 
-    reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
+        output = log_path.read_text(encoding="utf-8")
+        assert "Training for" in output, f"training never started:\n{output}"
 
-    deadline = time.time() + 120
-    while time.time() < deadline and not any("Training for" in ln for ln in lines):
-        if process.poll() is not None:
-            break
-        time.sleep(0.2)
-    assert any("Training for" in ln for ln in lines), "training never started:\n" + "".join(lines)
+        process.send_signal(signal.SIGTERM)
+        returncode = process.wait(timeout=120)
 
-    process.send_signal(signal.SIGTERM)
-    process.communicate(timeout=90)
-    reader.join(timeout=10)
-    output = "".join(lines)
-
-    assert process.returncode == 130, output
+    output = log_path.read_text(encoding="utf-8")
+    assert returncode == 130, output
     assert "Progress saved" in output, output
     assert list((tmp_path / "ckpt").glob("*/basic_final.zip")), output
+
+    # ViZDoom children must be gone once the trainer has exited.
+    deadline = time.time() + 30
+    while time.time() < deadline and _count_vizdoom_processes() > before:
+        time.sleep(0.5)
+    assert _count_vizdoom_processes() <= before, "ViZDoom child processes were orphaned"
